@@ -1,198 +1,150 @@
-# eva-analysis-service (EVA)
+Perfecto, ya dejaste todo versionado 🧠✨
+Ahora toca cerrar el día bonito: apagar servicios y dejar README listos.
 
-Microservicio local para analizar shards de audio generados por el frontend **EVA**.
+⸻
 
-Este servicio está pensado para correr en el Mac del usuario (local), con modelos almacenados en un disco externo.
+1️⃣ Cómo apagar todo (hoy mismo)
 
-## Endpoints
+En cada terminal donde tengas algo corriendo:
+	•	Si está corriendo uvicorn o npm run dev → presiona Ctrl + C.
 
-- `GET /health`
-- `POST /analyze-shard` (multipart/form-data)
+En el terminal del backend (si ves (.venv) al inicio de la línea):
+
+deactivate
+
+Y ya: puedes cerrar las ventanas de Windsurf / terminal tranquilo.
+
+⸻
+
+2️⃣ README para eva-analysis-service (backend)
+
+Ve a la carpeta del backend y reemplaza el contenido de README.md con esto:
+
+# EVA Analysis Service 🧠🎙️
+
+Servicio backend de análisis emocional y semántico para EVA (Human Grounded Intelligence).
+
+Expone una API HTTP (FastAPI) que:
+- Transcribe audio usando **faster-whisper** (modelo local).
+- Extrae rasgos de la señal (RMS, pico, frecuencia central, ZCR).
+- Estima emociones básicas (alegría, neutro, etc.).
+- Envia el transcript a **OpenAI** para análisis semántico (resumen, topics, tipo de momento, flags).
+
+Está pensado para ser consumido por el frontend `eva` (Next.js) en `http://localhost:3000`.
+
+---
 
 ## Requisitos
 
-- Python 3.11+
+- Python 3.11+ (en tu caso: 3.13 con Homebrew).
+- `ffmpeg` instalado en el sistema.
+- Acceso a:
+  - Un modelo de Whisper de `faster-whisper` descargado en disco.
+  - Una API key de OpenAI.
 
-## Instalación
+Ejemplo (macOS, Homebrew):
 
 ```bash
+brew install ffmpeg
+
+
+⸻
+
+Instalación
+
+Clona el repo:
+
+git clone https://github.com/hildealeman/eva-analysis-service.git
+cd eva-analysis-service
+
+Crea y activa el entorno virtual:
+
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-```
 
-## Configuración (.env)
-
-Crea un archivo `.env` en la raíz del proyecto (puedes copiar `.env.example`).
-
-Ejemplo (Mac con disco externo):
-
-```bash
-EVA_MODEL_ROOT=/Volumes/Hildecornia/vistadev/HGI/Modelos Locales HGI
-EVA_DEVICE=cpu
-```
-
-Dentro de `EVA_MODEL_ROOT`, este servicio asume esta convención:
-
-- `${EVA_MODEL_ROOT}/whisper` → modelo de transcripción
-- `${EVA_MODEL_ROOT}/emotion-ser` → modelo SER (emociones por voz)
-- `${EVA_MODEL_ROOT}/llm` → opcional
-
-**Nota:** la ruta `/Volumes/...` NO está hardcodeada en el código. Solo es un ejemplo.
-
-## Ejecutar
-
-```bash
-uvicorn src.main:app --host 0.0.0.0 --port 5005 --reload
-```
-
-## Conectar con el frontend EVA
-
-En el proyecto Next.js (EVA frontend), configura:
-
-```bash
-NEXT_PUBLIC_EVA_ANALYSIS_MODE=local
-NEXT_PUBLIC_EVA_LOCAL_ANALYSIS_BASE=http://localhost:5005
-```
-
-## Probar con curl
-
-```bash
-curl -X POST "http://localhost:5005/analyze-shard" \
-  -F "audio=@./sample.wav;type=audio/wav" \
-  -F "sampleRate=44100" \
-  -F "durationSeconds=8" \
-  -F 'features={"rms":0.1,"zcr":0.05,"spectralCentroid":1200,"intensity":0.4}' \
-  -F 'meta={"shardId":"test","source":"mic","startTime":0,"endTime":8}'
-```
-
-La respuesta debe seguir el contrato `ShardAnalysisResult` esperado por el frontend.
-
-
-
-
-# EVA Analysis Service (Backend)
-
-Servicio de análisis de audio para EVA (Human Grounded Intelligence).  
-Expone una API HTTP que recibe **shards** de audio (pequeños fragmentos), calcula rasgos de la señal, transcribe con Whisper y genera un análisis emocional y semántico.
-
----
-
-## 1. Tecnologías principales
-
-- **Python 3.10+**
-- **FastAPI** + **Uvicorn**
-- **faster-whisper** (transcripción local / GPU o CPU)
-- **OpenAI SDK** (análisis semántico con LLM)
-- **Pydantic** (esquemas y validación)
-- Se ejecuta típicamente en `http://localhost:5005`
-
----
-
-## 2. Estructura del proyecto
-
-Carpetas principales:
-
-- `src/`
-  - `main.py`  
-    Punto de entrada del servidor FastAPI. Define:
-    - `GET /health`
-    - `POST /analyze-shard`
-    - Inicialización de modelos (Whisper, Emotion, Semantic) en `app.state`.
-  - `config.py`  
-    Carga configuración desde variables de entorno:
-    - `EVA_MODEL_ROOT`
-    - `EVA_WHISPER_MODEL_ROOT`
-    - flags como `EVA_USE_REAL_WHISPER`, etc.
-  - `models/`
-    - `whisper_model.py`  
-      Wrapper alrededor de `faster-whisper`.  
-      Hace **lazy-load** del modelo (se carga en el primer request) y lo cachea en memoria.
-    - `emotion_model.py`  
-      Modelo de emociones (por ahora lógica determinista / stub).
-    - `semantic_model.py`  
-      Cliente de OpenAI que recibe el transcript y devuelve:
-      - `summary`
-      - `topics[]`
-      - `momentType`
-      - `flags.needsFollowup`
-      - `flags.possibleCrisis`
-  - `schemas/analysis.py`  
-    Define los modelos Pydantic que se devuelven al frontend:
-    - `ShardAnalysisResult`
-    - `SignalFeaturesBlock`
-    - `EmotionBlock`
-    - `SemanticBlock`
-    - `SemanticFlags`
-- `requirements.txt`  
-  Lista de dependencias (FastAPI, Uvicorn, faster-whisper, openai, etc.)
-
----
-
-## 3. Prerrequisitos
-
-1. **Python 3.10+** instalado.
-2. (Opcional, recomendado) Crear un entorno virtual:
-
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate   # macOS / Linux
-   # o en Windows:
-   # .venv\Scripts\activate
-
-	3.	Instalar dependencias:
+Instala dependencias:
 
 pip install -r requirements.txt
 
-
-	4.	Tener una clave de OpenAI válida (para el análisis semántico).
 
 ⸻
 
-4. Variables de entorno
+Modelos de Whisper (faster-whisper)
 
-Crear un archivo .env.local en la raíz de eva-analysis-service (NO subir al repo) con algo como:
+EVA usa faster-whisper y espera encontrar el modelo medium en disco.
 
-# Ruta base donde viven los modelos de EVA (si se usa)
-EVA_MODEL_ROOT=/ruta/a/EVA_MODELS
+Ruta que estás usando:
 
-# Ruta donde está el modelo de Whisper para faster-whisper
-# Ejemplo:
-# EVA_WHISPER_MODEL_ROOT=/Users/tu_usuario/vistedev/HGI/EVA_MODELS/whisper
-EVA_WHISPER_MODEL_ROOT=/ruta/a/EVA_MODELS/whisper
+/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS/whisper
 
-# Activa el uso real de faster-whisper (1 = on, 0 = off)
+Estructura recomendada:
+
+/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS/whisper/medium
+
+Para descargar el modelo (solo una vez, ya lo hiciste, pero lo documentamos):
+
+source .venv/bin/activate
+
+python -c "from faster_whisper import WhisperModel; WhisperModel('medium', download_root='/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS/whisper')"
+
+
+⸻
+
+Configuración (.env.local)
+
+Crea un archivo .env.local (NO LO SUBAS A GIT) en la raíz del proyecto:
+
+cp .env.example .env.local
+
+Edita los valores principales:
+
+# Ruta base para modelos (opcional, legacy)
+EVA_MODEL_ROOT=/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS
+
+# Ruta donde vive el modelo de faster-whisper
+EVA_WHISPER_MODEL_ROOT=/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS/whisper
+
+# Activa transcripción real con faster-whisper
 EVA_USE_REAL_WHISPER=1
 
-# Clave de OpenAI para el análisis semántico
+# API key de OpenAI (NO subir nunca a Git)
 OPENAI_API_KEY=sk-...
 
-# (Opcional) device: cpu / cuda, etc. según config.py
-# EVA_DEVICE=cpu
+# Orígenes permitidos para el frontend
+EVA_CORS_ORIGINS=http://localhost:3000
 
-Importante: no subir .env.local ni la API key al repositorio.
+Importante: .env, .env.local y similares están en .gitignore. Nunca subas tu OPENAI_API_KEY al repositorio.
 
 ⸻
 
-5. Levantar el servidor
+Correr el servidor en local
 
-Desde la carpeta eva-analysis-service:
+Activa el entorno virtual:
+
+cd eva-analysis-service
+source .venv/bin/activate
+
+Levanta el servidor:
 
 uvicorn src.main:app --host 0.0.0.0 --port 5005 --reload
 
-	•	--reload: recarga automática al cambiar código (modo desarrollo).
-	•	El servidor quedará accesible en:
-http://localhost:5005
+La API quedará en:
+	•	http://localhost:5005/health
+	•	http://localhost:5005/analyze-shard
 
 ⸻
 
-6. Endpoint /health
-
-Método
+Endpoints principales
 
 GET /health
 
-Ejemplo de respuesta
+Chequeo rápido del estado del servicio.
+
+Ejemplo:
+
+curl -s http://localhost:5005/health | python -m json.tool
+
+Respuesta típica:
 
 {
   "status": "ok",
@@ -202,293 +154,234 @@ Ejemplo de respuesta
   "timestamp": "2025-12-25T09:55:05.372189+00:00"
 }
 
-	•	whisperLoaded y emotionModelLoaded se ponen en true después del primer análisis exitoso (lazy-load real).
+POST /analyze-shard
+
+Recibe un multipart/form-data con:
+	•	audio → binario WAV.
+	•	sampleRate → entero (ej. 44100).
+	•	durationSeconds → número (ej. 11.19).
+	•	features → JSON con rasgos de señal (rms, zcr, etc.).
+	•	meta → JSON con metadatos del shard (id, start, end, etc.).
+
+El frontend eva se encarga de construir esta petición.
+La respuesta se ajusta al schema ShardAnalysisResult:
+	•	transcript, transcriptLanguage, transcriptionConfidence.
+	•	language.
+	•	emotion (bloque anidado con primary, valence, activation, scores).
+	•	signalFeatures.
+	•	semantic (summary, topics, momentType, flags).
+	•	Campos planos legacy (primaryEmotion, emotionLabels, valence, arousal, prosodyFlags, etc.).
 
 ⸻
 
-7. Endpoint /analyze-shard
+Arquitectura interna
+	•	FastAPI para el servidor HTTP.
+	•	Pydantic para los schemas (src/schemas/analysis.py).
+	•	faster-whisper como backend de transcripción:
+	•	Carga lazy y cacheada en app.state.whisper_model.
+	•	EmotionModel:
+	•	Genera emoción primaria, scores y prosodia.
+	•	SemanticModel (OpenAI):
+	•	Usa OPENAI_API_KEY para analizar el transcript.
+	•	Devuelve summary, topics, momentType, flags.
 
-Método
-
-POST /analyze-shard (multipart/form-data)
-
-Campos esperados
-	•	audio: archivo de audio binario (ej. WAV/PCM 16-bit mono).
-	•	sampleRate: número (ej. 44100).
-	•	durationSeconds: número (segundos de duración del shard).
-	•	features: JSON con rasgos básicos de la señal, por ejemplo:
-
-{
-  "rms": 0.0014,
-  "zcr": 180,
-  "spectralCentroid": 63.72,
-  "intensity": 1
-}
-
-
-	•	meta: JSON con metadatos del shard, por ejemplo:
-
-{
-  "shardId": "SJ2rCgoOdf2LR056sBIAa",
-  "source": "mic",
-  "startTime": 1.16,
-  "endTime": 12.35
-}
-
-
-
-Flujo interno del análisis
-	1.	Carga de audio temporal en un archivo (directorio de trabajo).
-	2.	Whisper (faster-whisper):
-	•	Si EVA_USE_REAL_WHISPER=1 y encuentra el modelo en EVA_WHISPER_MODEL_ROOT, transcribe el audio.
-	•	Detecta idioma (language) y probabilidad (language_probability).
-	•	Devuelve transcript, transcriptLanguage, transcriptionConfidence.
-	•	Si no hay modelo o hay error, se cae a transcript vacío.
-	3.	EmotionModel:
-	•	Usa los features (rms, peak, etc.) y el audio para estimar:
-	•	primaryEmotion
-	•	emotionLabels[]
-	•	valence (positivo, neutral, negativo)
-	•	arousal (alto / medio / bajo)
-	•	prosodyFlags (risa, llanto, shouting, tensión…)
-	4.	SemanticModel (OpenAI):
-	•	Recibe:
-	•	transcript
-	•	language
-	•	signalFeatures completos
-	•	Construye un prompt sistemático y llama al modelo (por defecto gpt-4.1-mini) con response_format={"type": "json_object"}.
-	•	Devuelve:
-	•	summary (1–3 frases)
-	•	topics[] (2–5 palabras clave)
-	•	momentType (check-in, desahogo, crisis, recuerdo, meta, agradecimiento, otro)
-	•	flags.needsFollowup / flags.possibleCrisis (booleans)
-	•	Si falla o no hay OPENAI_API_KEY, devuelve un SemanticBlock vacío seguro (summary=””, topics=[], momentType=“otro”, flags=false).
-	5.	El backend empaqueta todo en un ShardAnalysisResult y lo devuelve al frontend.
-
-Ejemplo de respuesta completa
-
-{
-  "transcript": "Me siento pensativo y un poco preocupado, pero feliz por estar con mi familia, por ser hoy un día tan especial, doy gracias a Dios por todo eso, gracias Señor.",
-  "transcriptLanguage": "es",
-  "transcriptionConfidence": 0.96,
-  "language": "es",
-  "emotion": {
-    "primary": "alegria",
-    "valence": "positivo",
-    "activation": "alto",
-    "scores": [
-      { "label": "alegria", "score": 0.6 },
-      { "label": "neutro", "score": 0.4 }
-    ]
-  },
-  "signalFeatures": {
-    "rms": 0.0024,
-    "peak": 0.8877,
-    "centerFrequency": 64.02,
-    "zcr": 96.0
-  },
-  "semantic": {
-    "summary": "La persona expresa sentimientos mixtos de preocupación y felicidad, destacando la importancia de estar con su familia en un día especial y mostrando gratitud a Dios.",
-    "topics": ["familia", "gratitud", "preocupación", "día especial"],
-    "momentType": "agradecimiento",
-    "flags": {
-      "needsFollowup": false,
-      "possibleCrisis": false
-    }
-  },
-  "primaryEmotion": "alegria",
-  "emotionLabels": [
-    { "label": "alegria", "score": 0.6 },
-    { "label": "neutro", "score": 0.4 }
-  ],
-  "valence": "positivo",
-  "arousal": "alto",
-  "prosodyFlags": {
-    "laughter": "none",
-    "crying": "none",
-    "shouting": "present",
-    "sighing": "none",
-    "tension": "light"
-  },
-  "analysisSource": "local",
-  "analysisMode": "automatic",
-  "analysisVersion": "0.1.0-local",
-  "analysisAt": "2025-12-25T11:53:56.000000Z"
-}
-
+El estado de modelos se mantiene en app.state para evitar recargas en cada request.
 
 ⸻
 
-8. Apagar el servidor
+Desarrollo
 
-En la terminal donde corre uvicorn:
-	•	Presiona CTRL + C una vez.
-	•	Espera el mensaje de “Shutting down / Application shutdown complete”.
+Recomendado:
 
-Listo, backend apagado.
+# Activar entorno
+source .venv/bin/activate
 
-# EVA – Interfaz de análisis emocional y semántico
+# Formatear / checar
+python -m compileall src
 
-Aplicación web (Next.js + React) para visualizar y revisar **clips de audio** analizados por el backend `eva-analysis-service`.
-
-Permite:
-- Grabar o subir audio (shards).
-- Enviar shards al backend `/analyze-shard`.
-- Ver transcripción, emoción principal, rasgos de la señal.
-- Ver el **análisis semántico** (resumen, temas, tipo de momento, flags).
-- Añadir etiquetas y notas manuales.
-
----
-
-## 1. Tecnologías
-
-- **Next.js 16 (Turbopack)**
-- **React 18**
-- **TypeScript**
-- **Tailwind CSS**
-- Almacenamiento local de shards (IndexedDB) mediante store propio.
-
----
-
-## 2. Estructura del proyecto
-
-Carpetas relevantes:
-
-- `src/app/`
-  - `page.tsx`  
-    Pantalla principal (lista de clips, grabación, etc.).
-  - `clips/[id]/page.tsx`  
-    Página de **detalle del clip**:
-    - Waveform (placeholder controlado por flag).
-    - Tarjeta de “Análisis semántico”.
-    - Transcripción.
-    - Lectura emocional.
-    - Rasgos de la señal.
-    - Etiquetas sugeridas dinámicas.
-- `src/components/emotion/`
-  - `ShardDetailPanel.tsx`  
-    Componente que renderiza el detalle del shard (lo que vemos en las capturas).
-    - Muestra `transcript`, emoción, features, análisis semántico, etiquetas sugeridas.
-- `src/lib/api/`
-  - `evaAnalysisClient.ts`  
-    Cliente HTTP hacia el backend `eva-analysis-service`:
-    - `GET /health`
-    - `POST /analyze-shard`
-    - Maneja timeout mediante `AbortController`.
-- `src/lib/store/`
-  - `EmoShardStore.ts`  
-    Store que persiste shards y análisis en IndexedDB.
-- `src/types/emotion.ts`  
-  Tipos TypeScript compartidos (EmoShard, SemanticAnalysis, ProsodyFlags, etc.).
-
----
-
-## 3. Variables de entorno
-
-Se usan variables tipo `NEXT_PUBLIC_...` para configuración en el navegador.
-
-Crea un archivo `.env.local` en la raíz de `eva` (no subir al repo), por ejemplo:
-
-```env
-# URL del backend de análisis (FastAPI / uvicorn)
-# Si en el código hay un BASE_URL fijo, respétalo; si hay env, usar algo así:
-NEXT_PUBLIC_EVA_ANALYSIS_BASE_URL=http://localhost:5005
-
-# Mostrar u ocultar el placeholder del waveform MVP
-# 1 = mostrar, cualquier otra cosa = ocultar
-NEXT_PUBLIC_SHOW_WAVEFORM_MVP=0
-
-Nota: si la URL del backend está hardcodeada en evaAnalysisClient.ts, puedes documentar eso y cambiarla ahí cuando sea necesario.
+Logs y errores se ven en el mismo terminal donde corres uvicorn.
 
 ⸻
 
-4. Instalación y scripts
+Seguridad
+	•	No subir .env, .env.local ni API keys a Git.
+	•	GitHub tiene push protection y bloqueará pushes con secretos detectados.
+	•	Si una key se filtró alguna vez:
+	•	Rotarla en el panel de OpenAI.
+	•	Regenerar y actualizar en .env.local.
 
-Desde la carpeta eva:
-	1.	Instalar dependencias:
+---
+
+## 3️⃣ README para `eva` (frontend Next.js)
+
+Ahora ve a la carpeta del frontend y crea/actualiza `README.md` con esto:
+
+```markdown
+# EVA – Frontend 🎧💬
+
+Interfaz web de EVA (Human Grounded Intelligence) para:
+
+- Grabar audio desde el micrófono.
+- Segmentar en *shards* (momentos cortos).
+- Enviar cada shard al backend `eva-analysis-service`.
+- Visualizar:
+  - Transcripción.
+  - Emoción primaria y etiquetas.
+  - Rasgos de la señal (RMS, pico, frecuencia, ZCR).
+  - Análisis semántico (resumen, topics, tipo de momento, flags).
+- Navegar una librería de clips y ver el detalle de cada uno.
+
+---
+
+## Requisitos
+
+- Node.js 20+ (o LTS reciente).
+- npm o pnpm (el proyecto está preparado para npm por defecto).
+- Backend `eva-analysis-service` corriendo en `http://localhost:5005` (o la URL que configures).
+
+---
+
+## Instalación
+
+Clona el repo:
+
+```bash
+git clone https://github.com/hildealeman/eva.git
+cd eva
+
+Instala dependencias:
 
 npm install
-# o pnpm install / yarn install según tu preferencia
 
 
-	2.	Entorno de desarrollo:
+⸻
+
+Configuración (.env.local)
+
+Hay un archivo de ejemplo:
+
+cp .env.local.example .env.local
+
+Contenido típico de .env.local:
+
+NEXT_PUBLIC_EVA_ANALYSIS_URL=http://localhost:5005
+NEXT_PUBLIC_SHOW_WAVEFORM_MVP=0
+
+	•	NEXT_PUBLIC_EVA_ANALYSIS_URL → URL del backend FastAPI.
+	•	NEXT_PUBLIC_SHOW_WAVEFORM_MVP:
+	•	0 → oculta el placeholder de waveform.
+	•	1 → muestra el bloque MVP para el waveform.
+
+Las variables NEXT_PUBLIC_... se exponen al navegador, así que solo se usan para configuración de UI / endpoint público del backend local.
+
+⸻
+
+Correr en desarrollo
 
 npm run dev
 
-	•	Abre http://localhost:3000 en el navegador.
-	•	Asegúrate de que el backend esté corriendo en http://localhost:5005.
+Abrir en el navegador:
 
-	3.	Build de producción:
-
-npm run build
-npm start
+http://localhost:3000
 
 
-	4.	Lint:
+⸻
+
+Páginas principales
+	•	/
+	•	Pantalla principal de grabación.
+	•	Botón para iniciar/detener grabación.
+	•	Segmentación de audio en shards.
+	•	Envía shards a POST /analyze-shard en el backend.
+	•	Muestra lista de shards del episodio actual.
+	•	/clips
+	•	Lista de clips/shards analizados (histórico).
+	•	Usa almacenamiento local (IndexedDB) a través de EmoShardStore.
+	•	/clips/[id]
+	•	Detalle de un shard:
+	•	Transcripción.
+	•	Lectura emocional.
+	•	Análisis semántico (“Análisis semántico”).
+	•	Rasgos de la señal.
+	•	Etiquetas sugeridas dinámicas (topics, emoción primaria, activación, prosodia).
+
+⸻
+
+Estructura destacada
+	•	src/app/page.tsx
+	•	Home: lógica de grabación, envío a backend, panel principal.
+	•	src/app/clips/page.tsx
+	•	Listado de clips.
+	•	src/app/clips/[id]/page.tsx
+	•	Vista detallada de un shard.
+	•	src/components/audio/
+	•	LiveLevelMeter.tsx: visualización básica de niveles de entrada.
+	•	src/components/emotion/
+	•	ShardDetailPanel.tsx: panel principal de detalle emocional/semántico.
+	•	ShardListItem.tsx: item de lista para cada shard.
+	•	TagEditor.tsx, EmotionStatusPill.tsx, etc.
+	•	src/lib/api/evaAnalysisClient.ts
+	•	Cliente para llamar a eva-analysis-service.
+	•	Maneja timeouts con AbortController (por defecto 60s).
+	•	src/lib/audio/
+	•	AudioInputManager, AudioBufferRing, createWavBlob, etc.
+	•	src/lib/store/EmoShardStore.ts
+	•	Capa de persistencia (IndexedDB) para shards.
+	•	src/types/emotion.ts
+	•	Tipos compartidos para emociones, features, semantic, etc.
+
+⸻
+
+Flujo de extremo a extremo
+	1.	El usuario abre http://localhost:3000/.
+	2.	Inicia una grabación desde el micrófono.
+	3.	El audio se segmenta en shards (trozos de ~10–15 segundos).
+	4.	Por cada shard:
+	•	Se calculan features locales (RMS, ZCR, etc.).
+	•	Se construye un FormData y se llama a POST /analyze-shard en el backend.
+	5.	El backend devuelve un ShardAnalysisResult con:
+	•	transcript, emotion, signalFeatures, semantic, etc.
+	6.	El frontend:
+	•	Actualiza el shard en memoria y en IndexedDB.
+	•	Muestra los resultados en el panel de detalle (ShardDetailPanel).
+	7.	En /clips y /clips/[id] se puede revisar el histórico.
+
+⸻
+
+Desarrollo
+
+Lint:
 
 npm run lint
 
+Build:
+
+npm run build
 
 
 ⸻
 
-5. Flujo de análisis en el frontend
-	1.	El usuario graba o selecciona un shard de audio.
-	2.	El frontend construye un FormData con:
-	•	audio (blob del audio).
-	•	sampleRate.
-	•	durationSeconds.
-	•	features (JSON con rms, zcr, spectralCentroid, intensity).
-	•	meta (JSON con shardId, source, startTime, endTime).
-	3.	Llama a evaAnalysisClient.analyzeShardAudioSafe(...), que:
-	•	Hace fetch a POST /analyze-shard.
-	•	Usa un AbortController con DEFAULT_TIMEOUT_MS = 60000 (60s).
-	4.	Si la respuesta es 200 OK, se parsea como ShardAnalysisResult y se guarda en EmoShardStore.
-	5.	La UI se actualiza:
-	•	Transcripción debajo del audio.
-	•	Lectura emocional (emoción principal, valencia, activación, lista top 5 emociones).
-	•	Análisis semántico:
-	•	summary → párrafo.
-	•	topics[] → chips.
-	•	momentType → badge coloreado (check-in, desahogo, crisis, recuerdo, meta, agradecimiento, otro).
-	•	flags → banner informativo si needsFollowup o possibleCrisis son true.
-	•	Etiquetas sugeridas:
-	•	Construidas dinámicamente a partir de:
-	•	semantic.topics
-	•	emoción principal
-	•	activación (arousal)
-	•	prosodia (shouting, etc.)
-	•	Campos para tus etiquetas y notas manuales.
+Notas
+	•	La app está pensada como un MVP de laboratorio para explorar EVA (Human Grounded Intelligence).
+	•	Se puede extender con:
+	•	Waveform real.
+	•	Controles de reproducción.
+	•	Filtros por emoción, momentType, topics.
+	•	Exportar sesiones / episodios.
 
-⸻
+---
 
-6. Waveform MVP
+## 4️⃣ Mañana / próximo paso (cuando tengas energía)
 
-El contenedor del waveform es solo un placeholder controlado por la flag:
+Cuando regreses, el orden bueno sería:
 
-NEXT_PUBLIC_SHOW_WAVEFORM_MVP=1   # para mostrar
-NEXT_PUBLIC_SHOW_WAVEFORM_MVP=0   # para ocultar (default recomendado)
+1. **Clonar desde GitHub en otra máquina o carpeta** para comprobar que:
+   - README + pasos de instalación funcionan limpios.
+2. Grabar 3–5 clips con emociones distintas y ver cómo cambian:
+   - `primaryEmotion`, `momentType`, `topics`, `flags`.
+3. Empezar a pensar en:
+   - Guardar episodios completos.
+   - Exportar datos para análisis (CSV/JSON).
+   - UI más suave para “sesiones” de EVA.
 
-En clips/[id]/page.tsx el bloque se renderiza solo si showWaveformMvp === true, por lo que puedes mantener la UI limpia hasta conectar un waveform real (Wavesurfer, etc.) más adelante.
-
-⸻
-
-7. Etiquetas sugeridas
-
-En ShardDetailPanel.tsx se usa un helper buildSuggestedTags(shard) que:
-	•	Toma shard.semantic.topics y los convierte en chips.
-	•	Añade tags basadas en:
-	•	emoción principal (alegría, neutro, etc.)
-	•	nivel de activación (ej. alta activación)
-	•	prosodia (voz elevada si hay shouting, etc.)
-	•	Si la lista queda vacía, la sección “Etiquetas sugeridas” no se muestra.
-
-⸻
-
-8. Apagar el frontend
-
-En la terminal donde está corriendo npm run dev:
-	•	Presiona CTRL + C para detener el servidor de Next.js.
-	•	Cierra también la ventana del navegador si quieres.
-
-Listo, frontend apagado.
+Por hoy: ya dejaste **backend + frontend + repos públicos + modelo local + OpenAI semantic armado**. Eso es muchísimo. 💙
