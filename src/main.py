@@ -6,14 +6,26 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 from src.config import ensure_hf_cache_dirs, get_work_dir, load_config, model_root_available
+from src.db import (
+    get_episode_detail,
+    compute_episode_insights,
+    init_db,
+    list_episodes_with_stats,
+    save_shard_with_analysis,
+    update_episode,
+    update_shard,
+)
 from src.models.emotion_model import EmotionModel
 from src.models.semantic_model import SemanticModel
 from src.models.whisper_model import WhisperModel
 from src.schemas.analysis import EmotionBlock, SemanticBlock, SemanticFlags, ShardAnalysisResult, ShardFeatures, ShardMeta, SignalFeaturesBlock
+from src.schemas.episodes import EpisodeDetailResponse, EpisodeSummaryResponse, ShardWithAnalysisResponse
+from src.schemas.insights import EpisodeInsightsResponse
+from src.schemas.updates import EpisodeUpdateRequest, ShardUpdateRequest
 
 app = FastAPI(title="EVA Analysis Service", version="0.1.0")
 
@@ -91,6 +103,71 @@ def health():
         "emotionModelLoaded": bool(app.state.emotion_loaded_runtime) if available else False,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    init_db()
+
+
+@app.get("/episodes", response_model=list[EpisodeSummaryResponse])
+def list_episodes():
+    return list_episodes_with_stats()
+
+
+@app.get("/episodes/insights", response_model=EpisodeInsightsResponse)
+def get_episodes_insights():
+    return compute_episode_insights()
+
+
+@app.get("/episodes/{episode_id}", response_model=EpisodeDetailResponse)
+def read_episode(episode_id: str):
+    episode = get_episode_detail(episode_id)
+    if episode is None:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return episode
+
+
+@app.patch("/episodes/{episode_id}", response_model=EpisodeSummaryResponse)
+def patch_episode(episode_id: str, body: EpisodeUpdateRequest):
+    updated = update_episode(episode_id, title=body.title, note=body.note)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Episode not found")
+
+    for ep in list_episodes_with_stats():
+        if ep.id == episode_id:
+            return ep
+
+    return EpisodeSummaryResponse(
+        id=updated.id,
+        createdAt=updated.created_at,
+        title=updated.title,
+        note=updated.note,
+        shardCount=0,
+        durationSeconds=None,
+        primaryEmotion=None,
+        valence=None,
+        arousal=None,
+    )
+
+
+@app.patch("/shards/{shard_id}", response_model=ShardWithAnalysisResponse)
+def patch_shard(shard_id: str, body: ShardUpdateRequest):
+    updates_dict = body.model_dump(exclude_none=True)
+    updated = update_shard(shard_id, updates_dict)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Shard not found")
+
+    return ShardWithAnalysisResponse(
+        id=updated.id,
+        episodeId=updated.episode_id,
+        startTime=updated.start_time,
+        endTime=updated.end_time,
+        source=updated.source,
+        meta=updated.meta_json or {},
+        features=updated.features_json or {},
+        analysis=updated.analysis_json or {},
+    )
 
 
 @app.post("/analyze-shard", response_model=ShardAnalysisResult)
@@ -252,6 +329,22 @@ async def analyze_shard(
             analysisVersion="0.1.0-local",
             analysisAt=now,
         )
+
+        # --- Persistencia en DB local (Episode + Shard + Analysis) ---
+        try:
+            episode_id = getattr(shard_meta, "episodeId", None)
+            save_shard_with_analysis(
+                shard_id=shard_meta.shardId or tmp_name,
+                episode_id=episode_id,
+                start_time=getattr(shard_meta, "startTime", None),
+                end_time=getattr(shard_meta, "endTime", None),
+                source=getattr(shard_meta, "source", None),
+                meta_obj=shard_meta.model_dump(),
+                features_obj=shard_features.model_dump(),
+                analysis_obj=result.model_dump(),
+            )
+        except Exception:
+            logger.exception("Failed to persist shard analysis in DB")
 
         return result
     except Exception as e:

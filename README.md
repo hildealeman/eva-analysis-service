@@ -1,387 +1,270 @@
-Perfecto, ya dejaste todo versionado 🧠✨
-Ahora toca cerrar el día bonito: apagar servicios y dejar README listos.
 
-⸻
 
-1️⃣ Cómo apagar todo (hoy mismo)
+# EVA Analysis Service
 
-En cada terminal donde tengas algo corriendo:
-	•	Si está corriendo uvicorn o npm run dev → presiona Ctrl + C.
+Backend de análisis de audio y emociones para **EVA** (EVA 1 = frontend, EVA 2 = backend).
 
-En el terminal del backend (si ves (.venv) al inicio de la línea):
-
-deactivate
-
-Y ya: puedes cerrar las ventanas de Windsurf / terminal tranquilo.
-
-⸻
-
-2️⃣ README para eva-analysis-service (backend)
-
-Ve a la carpeta del backend y reemplaza el contenido de README.md con esto:
-
-# EVA Analysis Service 🧠🎙️
-
-Servicio backend de análisis emocional y semántico para EVA (Human Grounded Intelligence).
-
-Expone una API HTTP (FastAPI) que:
-- Transcribe audio usando **faster-whisper** (modelo local).
-- Extrae rasgos de la señal (RMS, pico, frecuencia central, ZCR).
-- Estima emociones básicas (alegría, neutro, etc.).
-- Envia el transcript a **OpenAI** para análisis semántico (resumen, topics, tipo de momento, flags).
-
-Está pensado para ser consumido por el frontend `eva` (Next.js) en `http://localhost:3000`.
+Este servicio recibe *shards* de audio, los analiza (transcripción, emociones, momentos críticos) y persiste los resultados en una base de datos SQLite/Postgres. El frontend EVA consume estos resultados vía HTTP.
 
 ---
 
-## Requisitos
+## 1. Repositorio y estructura de proyecto
 
-- Python 3.11+ (en tu caso: 3.13 con Homebrew).
-- `ffmpeg` instalado en el sistema.
-- Acceso a:
-  - Un modelo de Whisper de `faster-whisper` descargado en disco.
-  - Una API key de OpenAI.
+Este directorio `eva-analysis-service/` forma parte del workspace de EVA junto con el frontend:
 
-Ejemplo (macOS, Homebrew):
+- `eva/` → Frontend Next.js (EVA 1, interfaz y IndexedDB)
+- `eva-analysis-service/` → Backend FastAPI (EVA 2, análisis y persistencia)
 
-```bash
-brew install ffmpeg
+Si tienes un repositorio remoto para este proyecto, puedes enlazarlo aquí, por ejemplo:
 
+```text
+Repo raíz: https://github.com/hildealeman/eva-analysis-service.git
+Frontend:  ./eva
+Backend:   ./eva-analysis-service
 
 ⸻
 
-Instalación
+2. Descripción general
 
-Clona el repo:
+EVA Analysis Service es un servicio HTTP basado en FastAPI con las siguientes responsabilidades:
+	•	Recibir audio de voz (como “shards” de una sesión).
+	•	Ejecutar análisis:
+	•	Transcripción de audio.
+	•	Extracción de rasgos / features.
+	•	Análisis emocional y semántico.
+	•	Guardar:
+	•	Información de episodios (sessions) en la tabla episode.
+	•	Shards y su análisis en la tabla shard (meta_json, features_json, analysis_json).
+	•	Exponer endpoints de lectura y edición para que el frontend liste episodios y actualice notas/etiquetas.
 
-git clone https://github.com/hildealeman/eva-analysis-service.git
+Tecnologías principales:
+	•	Python 3
+	•	FastAPI + Uvicorn
+	•	SQLModel + SQLite (por defecto, configurable a Postgres).
+	•	Librerías de audio/IA (p. ej. faster-whisper, openai) según la configuración.
+
+⸻
+
+3. Requisitos
+	•	Python 3.10+ (recomendado 3.11).
+	•	ffmpeg instalado en el sistema (si el pipeline de audio lo requiere).
+	•	Herramientas de compilación típicas de tu sistema (para instalar dependencias de audio si hacen falta).
+
+Instala dependencias de Python:
+
 cd eva-analysis-service
-
-Crea y activa el entorno virtual:
-
-python -m venv .venv
-source .venv/bin/activate
-
-Instala dependencias:
+python3 -m venv .venv
+source .venv/bin/activate   # en macOS/Linux
+# .venv\Scripts\activate    # en Windows PowerShell
 
 pip install -r requirements.txt
 
 
 ⸻
 
-Modelos de Whisper (faster-whisper)
+4. Configuración (variables de entorno)
 
-EVA usa faster-whisper y espera encontrar el modelo medium en disco.
+Las variables mínimas/útiles son:
+	•	EVA_DB_URL (opcional)
+	•	URL de la base de datos en formato SQLAlchemy.
+	•	Por defecto: sqlite:///./eva.db
+	•	Ejemplos:
+	•	SQLite (default): sqlite:///./eva.db
+	•	Postgres: postgresql+psycopg2://user:password@host:5432/eva
+	•	Variables relacionadas con modelos (nombres concretos pueden variar según tu implementación):
+	•	OPENAI_API_KEY si usas modelos de OpenAI.
+	•	Otras variables específicas del modelo de transcripción/análisis (consulta el código en src/ para ver las opciones que ya tengas configuradas).
 
-Ruta que estás usando:
+Configura también el frontend para apuntar a este backend:
 
-/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS/whisper
+En eva/.env.local (frontend):
 
-Estructura recomendada:
+NEXT_PUBLIC_EVA_ANALYSIS_MODE=local
+NEXT_PUBLIC_EVA_LOCAL_ANALYSIS_BASE=http://localhost:5005
+NEXT_PUBLIC_EVA_DATA_MODE=api   # si quieres que el frontend use los endpoints GET/PATCH
 
-/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS/whisper/medium
-
-Para descargar el modelo (solo una vez, ya lo hiciste, pero lo documentamos):
-
-source .venv/bin/activate
-
-python -c "from faster_whisper import WhisperModel; WhisperModel('medium', download_root='/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS/whisper')"
-
-
-⸻
-
-Configuración (.env.local)
-
-Crea un archivo .env.local (NO LO SUBAS A GIT) en la raíz del proyecto:
-
-cp .env.example .env.local
-
-Edita los valores principales:
-
-# Ruta base para modelos (opcional, legacy)
-EVA_MODEL_ROOT=/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS
-
-# Ruta donde vive el modelo de faster-whisper
-EVA_WHISPER_MODEL_ROOT=/Users/<TU_USUARIO>/vistedev/HGI/EVA_MODELS/whisper
-
-# Activa transcripción real con faster-whisper
-EVA_USE_REAL_WHISPER=1
-
-# API key de OpenAI (NO subir nunca a Git)
-OPENAI_API_KEY=sk-...
-
-# Orígenes permitidos para el frontend
-EVA_CORS_ORIGINS=http://localhost:3000
-
-Importante: .env, .env.local y similares están en .gitignore. Nunca subas tu OPENAI_API_KEY al repositorio.
 
 ⸻
 
-Correr el servidor en local
+5. Ejecutar el servidor en desarrollo
 
-Activa el entorno virtual:
-
-cd eva-analysis-service
-source .venv/bin/activate
-
-Levanta el servidor:
+Desde eva-analysis-service/ con tu entorno virtual activo:
 
 uvicorn src.main:app --host 0.0.0.0 --port 5005 --reload
 
-La API quedará en:
-	•	http://localhost:5005/health
-	•	http://localhost:5005/analyze-shard
+El API quedará disponible en:
+	•	http://localhost:5005
 
 ⸻
 
-Endpoints principales
+6. Modelo de datos
 
-GET /health
+La base de datos se gestiona con SQLModel. Hay dos tablas principales:
 
-Chequeo rápido del estado del servicio.
+6.1 Episode
+
+Representa una sesión completa de escucha con EVA.
+
+Campos típicos (resumen):
+	•	id: str — identificador de episodio.
+	•	created_at: datetime
+	•	title: Optional[str]
+	•	note: Optional[str]
+
+Los episodios se agregan y actualizan a medida que llegan shards y que el usuario edita metadatos (título, nota).
+
+6.2 Shard
+
+Representa un “momento” (clip) dentro de un episodio.
+
+Campos típicos:
+	•	id: str — identificador único del shard.
+	•	episode_id: Optional[str] — referencia al episodio.
+	•	start_time: Optional[float]
+	•	end_time: Optional[float]
+	•	source: Optional[str]
+	•	meta_json: dict — metadatos (ej. shardId, episodeId, source, etc.).
+	•	features_json: dict — features numéricos o rasgos derivados.
+	•	analysis_json: dict — resultado del modelo (emociones, transcripción, etc.).
+	•	Dentro de este dict, el bloque analysis_json["user"] se reserva para ediciones del usuario:
+	•	status
+	•	userTags
+	•	userNotes
+	•	transcriptOverride
+
+⸻
+
+7. Endpoints de la API
+
+7.1 Health check
+	•	GET /health
+Devuelve un JSON simple indicando que el servicio está vivo.
 
 Ejemplo:
 
-curl -s http://localhost:5005/health | python -m json.tool
+curl -sS http://localhost:5005/health | python3 -m json.tool
 
-Respuesta típica:
+
+⸻
+
+7.2 Analizar shard de audio
+	•	POST /analyze-shard
+Recibe audio + metadatos de un shard, ejecuta el pipeline de análisis y guarda en la DB.
+
+Campos típicos (multipart form-data):
+	•	audio: archivo de audio (audio/wav, etc.).
+	•	sampleRate: número (por ejemplo 16000).
+	•	durationSeconds: duración estimada.
+	•	features: JSON (string) con features opcionales.
+	•	meta: JSON (string) con info como:
+	•	shardId
+	•	episodeId
+	•	startTime
+	•	endTime
+	•	source
+
+Respuesta: objeto JSON con el resultado de análisis del shard (transcripción, emociones, etc.), compatible con el tipo ShardAnalysisResult usado por el frontend.
+
+⸻
+
+7.3 Listar episodios
+	•	GET /episodes
+Devuelve una lista de resúmenes de episodio.
+
+Cada elemento incluye, por ejemplo:
+	•	id: string
+	•	createdAt: string (ISO)
+	•	title: string | null
+	•	note: string | null
+	•	shardCount: number
+	•	durationSeconds: number | null
+	•	Campos agregados sobre emociones (según implementación actual).
+
+Este endpoint es usado por el frontend EVA cuando NEXT_PUBLIC_EVA_DATA_MODE=api para poblar la vista /clips.
+
+⸻
+
+7.4 Detalle de episodio
+	•	GET /episodes/{episode_id}
+Devuelve:
+	•	summary: resumen de episodio (como en /episodes).
+	•	shards: lista de shards con:
+	•	id, episodeId, startTime, endTime, source
+	•	meta, features, analysis
+
+El frontend usa esto para la vista de detalle /clips/[id].
+
+⸻
+
+7.5 Actualizar metadatos de episodio
+	•	PATCH /episodes/{episode_id}
+Permite actualizar título y nota de un episodio.
+
+Body (JSON):
 
 {
-  "status": "ok",
-  "modelRootAvailable": true,
-  "whisperLoaded": true,
-  "emotionModelLoaded": true,
-  "timestamp": "2025-12-25T09:55:05.372189+00:00"
+  "title": "Nuevo título opcional",
+  "note": "Alguna nota opcional"
 }
 
-POST /analyze-shard
-
-Recibe un multipart/form-data con:
-	•	audio → binario WAV.
-	•	sampleRate → entero (ej. 44100).
-	•	durationSeconds → número (ej. 11.19).
-	•	features → JSON con rasgos de señal (rms, zcr, etc.).
-	•	meta → JSON con metadatos del shard (id, start, end, etc.).
-
-El frontend eva se encarga de construir esta petición.
-La respuesta se ajusta al schema ShardAnalysisResult:
-	•	transcript, transcriptLanguage, transcriptionConfidence.
-	•	language.
-	•	emotion (bloque anidado con primary, valence, activation, scores).
-	•	signalFeatures.
-	•	semantic (summary, topics, momentType, flags).
-	•	Campos planos legacy (primaryEmotion, emotionLabels, valence, arousal, prosodyFlags, etc.).
+Solo los campos presentes se actualizan (semántica PATCH). El endpoint devuelve un EpisodeSummaryResponse actualizado.
 
 ⸻
 
-Arquitectura interna
-	•	FastAPI para el servidor HTTP.
-	•	Pydantic para los schemas (src/schemas/analysis.py).
-	•	faster-whisper como backend de transcripción:
-	•	Carga lazy y cacheada en app.state.whisper_model.
-	•	EmotionModel:
-	•	Genera emoción primaria, scores y prosodia.
-	•	SemanticModel (OpenAI):
-	•	Usa OPENAI_API_KEY para analizar el transcript.
-	•	Devuelve summary, topics, momentType, flags.
+7.6 Actualizar shard (ediciones del usuario)
+	•	PATCH /shards/{shard_id}
 
-El estado de modelos se mantiene en app.state para evitar recargas en cada request.
+Body (JSON):
 
-⸻
+{
+  "status": "reviewed",
+  "userTags": ["tag1", "tag2"],
+  "userNotes": "Comentario del usuario",
+  "transcriptOverride": "Transcripción corregida por el usuario"
+}
 
-Desarrollo
+El backend:
+	•	Lee analysis_json del shard.
+	•	Hace merge en analysis_json["user"] con estos campos.
+	•	No toca el resto del análisis automático.
 
-Recomendado:
-
-# Activar entorno
-source .venv/bin/activate
-
-# Formatear / checar
-python -m compileall src
-
-Logs y errores se ven en el mismo terminal donde corres uvicorn.
+Devuelve el shard actualizado con meta, features, analysis.
 
 ⸻
 
-Seguridad
-	•	No subir .env, .env.local ni API keys a Git.
-	•	GitHub tiene push protection y bloqueará pushes con secretos detectados.
-	•	Si una key se filtró alguna vez:
-	•	Rotarla en el panel de OpenAI.
-	•	Regenerar y actualizar en .env.local.
+8. Relación con el frontend EVA
+
+Cuando el frontend está configurado con:
+
+NEXT_PUBLIC_EVA_ANALYSIS_MODE=local
+NEXT_PUBLIC_EVA_LOCAL_ANALYSIS_BASE=http://localhost:5005
+NEXT_PUBLIC_EVA_DATA_MODE=api
+
+El flujo típico es:
+	1.	EVA 1 (frontend) detecta un momento intenso y manda el audio a POST /analyze-shard.
+	2.	EVA 2 analiza, guarda y responde con el análisis del shard.
+	3.	EVA 1 agrupa shards en episodios, los muestra en /clips y /clips/[id].
+	4.	Cuando el usuario edita título/nota del episodio o etiquetas/notas del shard:
+	•	EVA 1:
+	•	Guarda cambios localmente en IndexedDB.
+	•	Si EVA_DATA_MODE=api, también llama PATCH /episodes/{id} y PATCH /shards/{id} para sincronizar con EVA 2.
+
+⸻
+
+9. Producción
+
+Para desplegar en producción:
+	•	Usa un servidor WSGI/ASGI robusto (por ejemplo gunicorn + uvicorn worker).
+	•	Configura una base de datos duradera (Postgres recomendado) mediante EVA_DB_URL.
+	•	Protege el servicio detrás de un reverse proxy (Nginx, Caddy, etc.).
+	•	Asegura las claves de API y variables sensibles mediante un gestor de secretos.
+
+⸻
+
+10. Licencia y notas
+	•	Ajusta esta sección según la licencia que quieras usar (MIT, Propietaria, etc.).
+	•	Añade aquí cualquier nota adicional sobre uso, privacidad o términos específicos del proyecto HGI/EVA.
 
 ---
 
-## 3️⃣ README para `eva` (frontend Next.js)
-
-Ahora ve a la carpeta del frontend y crea/actualiza `README.md` con esto:
-
-```markdown
-# EVA – Frontend 🎧💬
-
-Interfaz web de EVA (Human Grounded Intelligence) para:
-
-- Grabar audio desde el micrófono.
-- Segmentar en *shards* (momentos cortos).
-- Enviar cada shard al backend `eva-analysis-service`.
-- Visualizar:
-  - Transcripción.
-  - Emoción primaria y etiquetas.
-  - Rasgos de la señal (RMS, pico, frecuencia, ZCR).
-  - Análisis semántico (resumen, topics, tipo de momento, flags).
-- Navegar una librería de clips y ver el detalle de cada uno.
-
----
-
-## Requisitos
-
-- Node.js 20+ (o LTS reciente).
-- npm o pnpm (el proyecto está preparado para npm por defecto).
-- Backend `eva-analysis-service` corriendo en `http://localhost:5005` (o la URL que configures).
-
----
-
-## Instalación
-
-Clona el repo:
-
-```bash
-git clone https://github.com/hildealeman/eva.git
-cd eva
-
-Instala dependencias:
-
-npm install
-
-
-⸻
-
-Configuración (.env.local)
-
-Hay un archivo de ejemplo:
-
-cp .env.local.example .env.local
-
-Contenido típico de .env.local:
-
-NEXT_PUBLIC_EVA_ANALYSIS_URL=http://localhost:5005
-NEXT_PUBLIC_SHOW_WAVEFORM_MVP=0
-
-	•	NEXT_PUBLIC_EVA_ANALYSIS_URL → URL del backend FastAPI.
-	•	NEXT_PUBLIC_SHOW_WAVEFORM_MVP:
-	•	0 → oculta el placeholder de waveform.
-	•	1 → muestra el bloque MVP para el waveform.
-
-Las variables NEXT_PUBLIC_... se exponen al navegador, así que solo se usan para configuración de UI / endpoint público del backend local.
-
-⸻
-
-Correr en desarrollo
-
-npm run dev
-
-Abrir en el navegador:
-
-http://localhost:3000
-
-
-⸻
-
-Páginas principales
-	•	/
-	•	Pantalla principal de grabación.
-	•	Botón para iniciar/detener grabación.
-	•	Segmentación de audio en shards.
-	•	Envía shards a POST /analyze-shard en el backend.
-	•	Muestra lista de shards del episodio actual.
-	•	/clips
-	•	Lista de clips/shards analizados (histórico).
-	•	Usa almacenamiento local (IndexedDB) a través de EmoShardStore.
-	•	/clips/[id]
-	•	Detalle de un shard:
-	•	Transcripción.
-	•	Lectura emocional.
-	•	Análisis semántico (“Análisis semántico”).
-	•	Rasgos de la señal.
-	•	Etiquetas sugeridas dinámicas (topics, emoción primaria, activación, prosodia).
-
-⸻
-
-Estructura destacada
-	•	src/app/page.tsx
-	•	Home: lógica de grabación, envío a backend, panel principal.
-	•	src/app/clips/page.tsx
-	•	Listado de clips.
-	•	src/app/clips/[id]/page.tsx
-	•	Vista detallada de un shard.
-	•	src/components/audio/
-	•	LiveLevelMeter.tsx: visualización básica de niveles de entrada.
-	•	src/components/emotion/
-	•	ShardDetailPanel.tsx: panel principal de detalle emocional/semántico.
-	•	ShardListItem.tsx: item de lista para cada shard.
-	•	TagEditor.tsx, EmotionStatusPill.tsx, etc.
-	•	src/lib/api/evaAnalysisClient.ts
-	•	Cliente para llamar a eva-analysis-service.
-	•	Maneja timeouts con AbortController (por defecto 60s).
-	•	src/lib/audio/
-	•	AudioInputManager, AudioBufferRing, createWavBlob, etc.
-	•	src/lib/store/EmoShardStore.ts
-	•	Capa de persistencia (IndexedDB) para shards.
-	•	src/types/emotion.ts
-	•	Tipos compartidos para emociones, features, semantic, etc.
-
-⸻
-
-Flujo de extremo a extremo
-	1.	El usuario abre http://localhost:3000/.
-	2.	Inicia una grabación desde el micrófono.
-	3.	El audio se segmenta en shards (trozos de ~10–15 segundos).
-	4.	Por cada shard:
-	•	Se calculan features locales (RMS, ZCR, etc.).
-	•	Se construye un FormData y se llama a POST /analyze-shard en el backend.
-	5.	El backend devuelve un ShardAnalysisResult con:
-	•	transcript, emotion, signalFeatures, semantic, etc.
-	6.	El frontend:
-	•	Actualiza el shard en memoria y en IndexedDB.
-	•	Muestra los resultados en el panel de detalle (ShardDetailPanel).
-	7.	En /clips y /clips/[id] se puede revisar el histórico.
-
-⸻
-
-Desarrollo
-
-Lint:
-
-npm run lint
-
-Build:
-
-npm run build
-
-
-⸻
-
-Notas
-	•	La app está pensada como un MVP de laboratorio para explorar EVA (Human Grounded Intelligence).
-	•	Se puede extender con:
-	•	Waveform real.
-	•	Controles de reproducción.
-	•	Filtros por emoción, momentType, topics.
-	•	Exportar sesiones / episodios.
-
----
-
-## 4️⃣ Mañana / próximo paso (cuando tengas energía)
-
-Cuando regreses, el orden bueno sería:
-
-1. **Clonar desde GitHub en otra máquina o carpeta** para comprobar que:
-   - README + pasos de instalación funcionan limpios.
-2. Grabar 3–5 clips con emociones distintas y ver cómo cambian:
-   - `primaryEmotion`, `momentType`, `topics`, `flags`.
-3. Empezar a pensar en:
-   - Guardar episodios completos.
-   - Exportar datos para análisis (CSV/JSON).
-   - UI más suave para “sesiones” de EVA.
-
-Por hoy: ya dejaste **backend + frontend + repos públicos + modelo local + OpenAI semantic armado**. Eso es muchísimo. 💙
+Si quieres, en el siguiente paso afinamos solo la sección de **API** para que quede exactamente 1:1 con lo que EVA 1 está usando ahora mismo (nombres de campos, tipos, etc.).

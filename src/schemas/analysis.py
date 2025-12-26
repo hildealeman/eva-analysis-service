@@ -44,6 +44,7 @@ class ShardFeatures(BaseModel):
 
 class ShardMeta(BaseModel):
     shardId: Optional[str] = None
+    episodeId: Optional[str] = None
     source: Optional[str] = None
     startTime: Optional[float] = None
     endTime: Optional[float] = None
