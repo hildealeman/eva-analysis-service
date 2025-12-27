@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -24,6 +24,10 @@ class ShardWithAnalysisResponse(BaseModel):
     startTime: Optional[float] = None
     endTime: Optional[float] = None
     source: Optional[str] = None
+    publishState: Optional[Literal["draft", "reviewed", "readyToPublish", "published"]] = None
+    deleted: bool = False
+    deletedReason: Optional[str] = None
+    deletedAt: Optional[datetime] = None
     meta: dict[str, Any]
     features: dict[str, Any]
     analysis: dict[str, Any]

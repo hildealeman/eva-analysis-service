@@ -1,31 +1,146 @@
 from __future__ import annotations
 
+from src.schemas.community import (
+    CreateInvitationRequest,
+    CreateInvitationResponse,
+    InvitationOut,
+    InvitationsSummaryOut,
+    MeInvitationsResponse,
+    MeProgressResponse,
+    MeResponse,
+    ProfileOut,
+    ProgressSummaryOut,
+)
 import logging
 import os
 import shutil
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 from src.config import ensure_hf_cache_dirs, get_work_dir, load_config, model_root_available
 from src.db import (
-    get_episode_detail,
     compute_episode_insights,
+    compute_progress_history,
+    compute_progress_summary_for_date,
+    create_invitation,
+    get_episode_detail,
+    get_or_create_profile,
     init_db,
     list_episodes_with_stats,
+    list_invitations_for_profile,
+    publish_shard,
     save_shard_with_analysis,
+    soft_delete_shard,
+    touch_profile_activity,
     update_episode,
     update_shard,
+    get_shard,
 )
 from src.models.emotion_model import EmotionModel
 from src.models.semantic_model import SemanticModel
 from src.models.whisper_model import WhisperModel
-from src.schemas.analysis import EmotionBlock, SemanticBlock, SemanticFlags, ShardAnalysisResult, ShardFeatures, ShardMeta, SignalFeaturesBlock
+from src.schemas.analysis import EmotionBlock, EmotionDistribution, SemanticBlock, SemanticFlags, ShardAnalysisResult, ShardFeatures, ShardMeta, SignalFeaturesBlock
 from src.schemas.episodes import EpisodeDetailResponse, EpisodeSummaryResponse, ShardWithAnalysisResponse
 from src.schemas.insights import EpisodeInsightsResponse
-from src.schemas.updates import EpisodeUpdateRequest, ShardUpdateRequest
+from src.schemas.updates import EpisodeUpdateRequest, ShardDeleteRequest, ShardPublishRequest, ShardUpdateRequest
+
+
+def _map_valence_to_en(valence: Optional[str]) -> Optional[str]:
+    if valence is None:
+        return None
+    v = str(valence).strip().lower()
+    if v in {"positivo", "positive"}:
+        return "positive"
+    if v in {"neutral", "neutro"}:
+        return "neutral"
+    if v in {"negativo", "negative"}:
+        return "negative"
+    return None
+
+
+def _map_activation_to_en(arousal: Optional[str]) -> Optional[str]:
+    if arousal is None:
+        return None
+    a = str(arousal).strip().lower()
+    if a in {"bajo", "low"}:
+        return "low"
+    if a in {"medio", "medium"}:
+        return "medium"
+    if a in {"alto", "high"}:
+        return "high"
+    return None
+
+
+def _build_emotion_headline(primary: Optional[str], activation: Optional[str], peak: Optional[float]) -> Optional[str]:
+    if not primary:
+        return None
+
+    act = (activation or "").lower()
+    if act == "high":
+        if primary.lower() in {"enojo", "ira"}:
+            return "Alza de voz."
+        if primary.lower() in {"miedo", "ansiedad"}:
+            return "Tensión evidente."
+        return "Emoción intensa."
+    if act == "low":
+        return "Tono contenido."
+    if act == "medium":
+        return "Emoción moderada."
+
+    if peak is not None and peak >= 0.75:
+        return "Alza de voz."
+    return None
+
+
+def _current_profile_id(x_profile_id: Optional[str]) -> str:
+    candidate = (x_profile_id or "").strip()
+    return candidate if candidate else "local_profile_1"
+
+
+def _dt_to_iso(dt: Optional[datetime]) -> Optional[str]:
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _profile_to_out(p) -> ProfileOut:
+    remaining = int(p.invitations_granted_total) - int(p.invitations_used)
+    if remaining < 0:
+        remaining = 0
+    return ProfileOut(
+        id=p.id,
+        createdAt=_dt_to_iso(p.created_at) or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        updatedAt=_dt_to_iso(p.updated_at) or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        role=str(p.role),
+        state=str(p.state),
+        tevScore=float(p.tev_score),
+        dailyStreak=int(p.daily_streak),
+        lastActiveAt=_dt_to_iso(p.last_active_at) or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        invitationsGrantedTotal=int(p.invitations_granted_total),
+        invitationsUsed=int(p.invitations_used),
+        invitationsRemaining=int(remaining),
+    )
+
+
+def _invitation_to_out(i) -> InvitationOut:
+    return InvitationOut(
+        id=i.id,
+        createdAt=_dt_to_iso(i.created_at) or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        updatedAt=_dt_to_iso(i.updated_at) or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        inviterId=i.inviter_id,
+        inviteeId=i.invitee_id,
+        email=i.email,
+        code=i.code,
+        state=str(i.state),
+        expiresAt=_dt_to_iso(i.expires_at) or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        acceptedAt=_dt_to_iso(i.accepted_at),
+        revokedAt=_dt_to_iso(i.revoked_at),
+    )
+
 
 app = FastAPI(title="EVA Analysis Service", version="0.1.0")
 
@@ -98,6 +213,8 @@ def health():
 
     return {
         "status": status,
+        "service": "eva-analysis-service",
+        "contractVersion": "0.2.0",
         "modelRootAvailable": available,
         "whisperLoaded": bool(app.state.whisper_loaded_runtime) if available else False,
         "emotionModelLoaded": bool(app.state.emotion_loaded_runtime) if available else False,
@@ -108,6 +225,71 @@ def health():
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+
+
+@app.get("/me", response_model=MeResponse)
+def get_me(x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id")):
+    profile_id = _current_profile_id(x_profile_id)
+    prof = get_or_create_profile(profile_id)
+    touch_profile_activity(profile_id)
+
+    profile_out = _profile_to_out(prof)
+    today_dict = compute_progress_summary_for_date(profile_id=profile_id, day=datetime.now(timezone.utc).date())
+    today = ProgressSummaryOut.model_validate(today_dict)
+
+    summary = InvitationsSummaryOut(
+        grantedTotal=profile_out.invitationsGrantedTotal,
+        used=profile_out.invitationsUsed,
+        remaining=profile_out.invitationsRemaining,
+    )
+
+    return MeResponse(profile=profile_out, todayProgress=today, invitationsSummary=summary)
+
+
+@app.get("/me/progress", response_model=MeProgressResponse)
+def get_me_progress_v3(x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id")):
+    profile_id = _current_profile_id(x_profile_id)
+    get_or_create_profile(profile_id)
+    touch_profile_activity(profile_id)
+
+    today_dict = compute_progress_summary_for_date(profile_id=profile_id, day=datetime.now(timezone.utc).date())
+    history_dicts = compute_progress_history(profile_id=profile_id, days=30)
+    return MeProgressResponse(
+        today=ProgressSummaryOut.model_validate(today_dict),
+        history=[ProgressSummaryOut.model_validate(d) for d in history_dicts],
+    )
+
+
+@app.get("/me/invitations", response_model=MeInvitationsResponse)
+def get_me_invitations(x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id")):
+    profile_id = _current_profile_id(x_profile_id)
+    get_or_create_profile(profile_id)
+    touch_profile_activity(profile_id)
+
+    invs = list_invitations_for_profile(profile_id)
+    return MeInvitationsResponse(invitations=[_invitation_to_out(i) for i in invs])
+
+
+@app.post("/invitations", response_model=CreateInvitationResponse)
+def post_invitations(
+    body: CreateInvitationRequest,
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
+):
+    profile_id = _current_profile_id(x_profile_id)
+    get_or_create_profile(profile_id)
+    touch_profile_activity(profile_id)
+
+    email = (body.email or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="email is required")
+
+    inv, status = create_invitation(inviter_profile_id=profile_id, email=email)
+    if status == "no_invitations_remaining":
+        raise HTTPException(status_code=400, detail="No invitations remaining")
+    if inv is None:
+        raise HTTPException(status_code=500, detail="Could not create invitation")
+
+    return CreateInvitationResponse(invitation=_invitation_to_out(inv))
 
 
 @app.get("/episodes", response_model=list[EpisodeSummaryResponse])
@@ -158,15 +340,110 @@ def patch_shard(shard_id: str, body: ShardUpdateRequest):
     if updated is None:
         raise HTTPException(status_code=404, detail="Shard not found")
 
+    analysis = updated.analysis_json if isinstance(updated.analysis_json, dict) else {}
+    publish_state = analysis.get("publishState") if isinstance(analysis.get("publishState"), str) else None
+    deleted = bool(analysis.get("deleted")) if isinstance(analysis.get("deleted"), (bool, int)) else False
+    deleted_reason = analysis.get("deletedReason") if isinstance(analysis.get("deletedReason"), str) else None
+    deleted_at = None
+    deleted_at_raw = analysis.get("deletedAt")
+    if isinstance(deleted_at_raw, str) and deleted_at_raw.strip():
+        try:
+            deleted_at = datetime.fromisoformat(deleted_at_raw.replace("Z", "+00:00"))
+        except Exception:
+            deleted_at = None
+
     return ShardWithAnalysisResponse(
         id=updated.id,
         episodeId=updated.episode_id,
         startTime=updated.start_time,
         endTime=updated.end_time,
         source=updated.source,
+        publishState=publish_state,
+        deleted=deleted,
+        deletedReason=deleted_reason,
+        deletedAt=deleted_at,
         meta=updated.meta_json or {},
         features=updated.features_json or {},
         analysis=updated.analysis_json or {},
+    )
+
+
+@app.post("/shards/{shard_id}/publish", response_model=ShardWithAnalysisResponse)
+def publish_shard_endpoint(shard_id: str, body: ShardPublishRequest):
+    shard = get_shard(shard_id)
+    if shard is None:
+        raise HTTPException(status_code=404, detail="Shard not found")
+
+    analysis = shard.analysis_json if isinstance(shard.analysis_json, dict) else {}
+    deleted = bool(analysis.get("deleted")) if isinstance(analysis.get("deleted"), (bool, int)) else False
+    if deleted:
+        raise HTTPException(status_code=400, detail="Cannot publish a deleted shard")
+
+    updated = publish_shard(shard_id=shard_id, force=bool(body.force))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Shard not found")
+
+    updated_analysis = updated.analysis_json if isinstance(updated.analysis_json, dict) else {}
+    publish_state = updated_analysis.get("publishState") if isinstance(updated_analysis.get("publishState"), str) else None
+    deleted_reason = updated_analysis.get("deletedReason") if isinstance(updated_analysis.get("deletedReason"), str) else None
+    deleted_at = None
+    deleted_at_raw = updated_analysis.get("deletedAt")
+    if isinstance(deleted_at_raw, str) and deleted_at_raw.strip():
+        try:
+            deleted_at = datetime.fromisoformat(deleted_at_raw.replace("Z", "+00:00"))
+        except Exception:
+            deleted_at = None
+
+    return ShardWithAnalysisResponse(
+        id=updated.id,
+        episodeId=updated.episode_id,
+        startTime=updated.start_time,
+        endTime=updated.end_time,
+        source=updated.source,
+        publishState=publish_state,
+        deleted=False,
+        deletedReason=deleted_reason,
+        deletedAt=deleted_at,
+        meta=updated.meta_json or {},
+        features=updated.features_json or {},
+        analysis=updated_analysis or {},
+    )
+
+
+@app.post("/shards/{shard_id}/delete", response_model=ShardWithAnalysisResponse)
+def delete_shard_endpoint(shard_id: str, body: ShardDeleteRequest):
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason is required")
+
+    updated = soft_delete_shard(shard_id=shard_id, reason=reason)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Shard not found")
+
+    updated_analysis = updated.analysis_json if isinstance(updated.analysis_json, dict) else {}
+    publish_state = updated_analysis.get("publishState") if isinstance(updated_analysis.get("publishState"), str) else None
+    deleted_reason = updated_analysis.get("deletedReason") if isinstance(updated_analysis.get("deletedReason"), str) else None
+    deleted_at = None
+    deleted_at_raw = updated_analysis.get("deletedAt")
+    if isinstance(deleted_at_raw, str) and deleted_at_raw.strip():
+        try:
+            deleted_at = datetime.fromisoformat(deleted_at_raw.replace("Z", "+00:00"))
+        except Exception:
+            deleted_at = None
+
+    return ShardWithAnalysisResponse(
+        id=updated.id,
+        episodeId=updated.episode_id,
+        startTime=updated.start_time,
+        endTime=updated.end_time,
+        source=updated.source,
+        publishState=publish_state,
+        deleted=True,
+        deletedReason=deleted_reason,
+        deletedAt=deleted_at,
+        meta=updated.meta_json or {},
+        features=updated.features_json or {},
+        analysis=updated_analysis or {},
     )
 
 
@@ -295,11 +572,45 @@ async def analyze_shard(
             peak=shard_features.intensity,
         )
 
-        emotion_block = EmotionBlock(
+        emotion_legacy = EmotionBlock(
             primary=primary_emotion,
             valence=valence,
             activation=arousal,
             scores=emotion_labels,
+        )
+
+        distribution: dict[str, float] = {}
+        if isinstance(emotion_labels, list):
+            total = 0.0
+            for item in emotion_labels:
+                try:
+                    label = getattr(item, "label", None)
+                    score = getattr(item, "score", None)
+                    if not isinstance(label, str):
+                        continue
+                    if not isinstance(score, (int, float)):
+                        continue
+                    score_f = float(score)
+                    if score_f < 0:
+                        continue
+                    distribution[label] = score_f
+                    total += score_f
+                except Exception:
+                    continue
+            if total > 0:
+                distribution = {k: v / total for k, v in distribution.items()}
+
+        emotion_v2 = EmotionDistribution(
+            primary=str(primary_emotion) if primary_emotion is not None else None,
+            valence=_map_valence_to_en(str(valence) if valence is not None else None),
+            activation=_map_activation_to_en(str(arousal) if arousal is not None else None),
+            distribution=distribution,
+            headline=_build_emotion_headline(
+                str(primary_emotion) if primary_emotion is not None else None,
+                _map_activation_to_en(str(arousal) if arousal is not None else None),
+                shard_features.intensity,
+            ),
+            explanation=None,
         )
 
         semantic_model = get_semantic_model()
@@ -315,7 +626,8 @@ async def analyze_shard(
             transcriptionConfidence=transcript_confidence,
 
             language=transcript_language,
-            emotion=emotion_block,
+            emotion=emotion_v2,
+            emotionLegacy=emotion_legacy,
             signalFeatures=signal,
             semantic=semantic,
 

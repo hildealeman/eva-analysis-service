@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 CoreEmotion = Literal[
@@ -57,6 +57,15 @@ class EmotionBlock(BaseModel):
     scores: Optional[list[EmotionLabelScore]] = None
 
 
+class EmotionDistribution(BaseModel):
+    primary: Optional[str] = None
+    valence: Optional[Literal["positive", "neutral", "negative"]] = None
+    activation: Optional[Literal["low", "medium", "high"]] = None
+    distribution: dict[str, float] = Field(default_factory=dict)
+    headline: Optional[str] = None
+    explanation: Optional[str] = None
+
+
 class SignalFeaturesBlock(BaseModel):
     rms: Optional[float] = None
     peak: Optional[float] = None
@@ -83,7 +92,8 @@ class ShardAnalysisResult(BaseModel):
 
     # Additive enriched fields (do not break existing frontend consumers)
     language: Optional[str] = None
-    emotion: Optional[EmotionBlock] = None
+    emotion: Optional[EmotionDistribution] = None
+    emotionLegacy: Optional[EmotionBlock] = None
     signalFeatures: Optional[SignalFeaturesBlock] = None
     semantic: Optional[SemanticBlock] = None
 

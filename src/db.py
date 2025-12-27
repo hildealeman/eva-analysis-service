@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+import secrets
+import string
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import Column
@@ -25,6 +27,49 @@ class Episode(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     title: Optional[str] = None
     note: Optional[str] = None
+
+
+class Profile(SQLModel, table=True):
+    id: str = Field(primary_key=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    role: str = "ghost"  # "ghost" | "active"
+    state: str = "ok"  # "ok" | "suspended" | "banned"
+
+    tev_score: float = 12.5
+    daily_streak: int = 0
+    last_active_at: Optional[datetime] = None
+
+    invitations_granted_total: int = 3
+    invitations_used: int = 0
+
+
+class Invitation(SQLModel, table=True):
+    id: str = Field(primary_key=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    inviter_id: str = Field(index=True, foreign_key="profile.id")
+    invitee_id: Optional[str] = Field(default=None, index=True)
+
+    email: str = Field(index=True)
+    code: str = Field(index=True)
+
+    state: str = "pending"  # "pending" | "accepted" | "revoked" | "expired"
+    expires_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc) + timedelta(days=30))
+
+    accepted_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+
+
+class VoteEvent(SQLModel, table=True):
+    id: str = Field(primary_key=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    profile_id: str = Field(index=True, foreign_key="profile.id")
+    shard_id: Optional[str] = Field(default=None, index=True)
+    direction: str  # "up" | "down"
 
 
 class Shard(SQLModel, table=True):
@@ -86,6 +131,13 @@ def save_shard_with_analysis(
             )
             session.add(shard)
         else:
+            prev_analysis = existing.analysis_json if isinstance(existing.analysis_json, dict) else {}
+            if isinstance(prev_analysis.get("user"), dict) and "user" not in analysis_dict:
+                analysis_dict["user"] = prev_analysis.get("user")
+            for k in ("publishState", "deleted", "deletedReason", "deletedAt"):
+                if k in prev_analysis and k not in analysis_dict:
+                    analysis_dict[k] = prev_analysis.get(k)
+
             existing.episode_id = episode_id
             existing.start_time = start_time
             existing.end_time = end_time
@@ -96,6 +148,166 @@ def save_shard_with_analysis(
             session.add(existing)
 
         session.commit()
+
+
+def get_or_create_profile(profile_id: str) -> Profile:
+    with Session(engine) as session:
+        existing = session.get(Profile, profile_id)
+        if existing is not None:
+            return existing
+
+        now = datetime.now(timezone.utc)
+        prof = Profile(
+            id=profile_id,
+            created_at=now,
+            updated_at=now,
+            role="ghost",
+            state="ok",
+            tev_score=12.5,
+            daily_streak=0,
+            last_active_at=now,
+            invitations_granted_total=3,
+            invitations_used=0,
+        )
+        session.add(prof)
+        session.commit()
+        session.refresh(prof)
+        return prof
+
+
+def touch_profile_activity(profile_id: str) -> None:
+    with Session(engine) as session:
+        prof = session.get(Profile, profile_id)
+        if prof is None:
+            return
+        prof.updated_at = datetime.now(timezone.utc)
+        prof.last_active_at = prof.updated_at
+        session.add(prof)
+        session.commit()
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _code(prefix: str = "HGI") -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    a = "".join(secrets.choice(alphabet) for _ in range(4))
+    b = "".join(secrets.choice(alphabet) for _ in range(4))
+    return f"{prefix}-{a}-{b}"
+
+
+def list_invitations_for_profile(profile_id: str) -> list[Invitation]:
+    with Session(engine) as session:
+        return session.exec(
+            select(Invitation)
+            .where(Invitation.inviter_id == profile_id)
+            .order_by(Invitation.created_at.desc())
+        ).all()
+
+
+def create_invitation(*, inviter_profile_id: str, email: str) -> tuple[Optional[Invitation], str]:
+    with Session(engine) as session:
+        prof = session.get(Profile, inviter_profile_id)
+        if prof is None:
+            return None, "profile_not_found"
+
+        remaining = int(prof.invitations_granted_total) - int(prof.invitations_used)
+        if remaining <= 0:
+            return None, "no_invitations_remaining"
+
+        now = datetime.now(timezone.utc)
+        inv = Invitation(
+            id=f"inv_{secrets.token_hex(8)}",
+            created_at=now,
+            updated_at=now,
+            inviter_id=inviter_profile_id,
+            invitee_id=None,
+            email=email,
+            code=_code(),
+            state="pending",
+            expires_at=now + timedelta(days=30),
+            accepted_at=None,
+            revoked_at=None,
+        )
+        session.add(inv)
+
+        prof.invitations_used = int(prof.invitations_used) + 1
+        prof.updated_at = now
+        prof.last_active_at = now
+        session.add(prof)
+
+        session.commit()
+        session.refresh(inv)
+        return inv, "ok"
+
+
+def _date_str(d: date) -> str:
+    return d.isoformat()
+
+
+def compute_progress_summary_for_date(*, profile_id: str, day: date) -> dict:
+    start_dt = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    end_dt = start_dt + timedelta(days=1)
+
+    with Session(engine) as session:
+        shards = session.exec(select(Shard).where(Shard.created_at >= start_dt, Shard.created_at < end_dt)).all()
+        votes = session.exec(
+            select(VoteEvent).where(
+                VoteEvent.profile_id == profile_id,
+                VoteEvent.created_at >= start_dt,
+                VoteEvent.created_at < end_dt,
+            )
+        ).all()
+        prof = session.get(Profile, profile_id)
+
+    up = 0
+    down = 0
+    for v in votes:
+        if getattr(v, "direction", None) == "up":
+            up += 1
+        elif getattr(v, "direction", None) == "down":
+            down += 1
+
+    reviewed = 0
+    published = 0
+    for s in shards:
+        analysis = s.analysis_json if isinstance(s.analysis_json, dict) else {}
+        user_block = analysis.get("user") if isinstance(analysis.get("user"), dict) else {}
+        status = user_block.get("status")
+        if isinstance(status, str) and status.strip().lower() == "reviewed":
+            reviewed += 1
+        publish_state = analysis.get("publishState")
+        if isinstance(publish_state, str) and publish_state == "published":
+            published += 1
+
+    activity_minutes = min(180, max(0, reviewed * 3 + published * 2 + (up + down)))
+
+    tev_end = float(prof.tev_score) if prof is not None else 12.5
+    tev_start = tev_end
+    tev_delta = 0.0
+
+    return {
+        "date": _date_str(day),
+        "tevScoreStart": tev_start,
+        "tevScoreEnd": tev_end,
+        "tevDelta": tev_delta,
+        "votesGiven": {"up": up, "down": down},
+        "activityMinutes": int(activity_minutes),
+        "shardsReviewed": int(reviewed),
+        "shardsPublished": int(published),
+        "levelLabel": "ghost" if (prof is None or prof.role == "ghost") else "active",
+        "progressPercentToNextLevel": 42,
+    }
+
+
+def compute_progress_history(*, profile_id: str, days: int = 30) -> list[dict]:
+    today = datetime.now(timezone.utc).date()
+    out: list[dict] = []
+    for i in range(days):
+        d = today - timedelta(days=i)
+        out.append(compute_progress_summary_for_date(profile_id=profile_id, day=d))
+    return out
 
 
 def _extract_emotion_fields_from_analysis(analysis_json: dict) -> tuple[Optional[str], Optional[str], Optional[str]]:
@@ -204,6 +416,18 @@ def get_episode_detail(episode_id: str) -> Optional[EpisodeDetailResponse]:
 
         shard_items: list[ShardWithAnalysisResponse] = []
         for s in shards:
+            analysis = s.analysis_json if isinstance(s.analysis_json, dict) else {}
+            publish_state = analysis.get("publishState") if isinstance(analysis.get("publishState"), str) else None
+            deleted = bool(analysis.get("deleted")) if isinstance(analysis.get("deleted"), (bool, int)) else False
+            deleted_reason = analysis.get("deletedReason") if isinstance(analysis.get("deletedReason"), str) else None
+            deleted_at: Optional[datetime] = None
+            deleted_at_raw = analysis.get("deletedAt")
+            if isinstance(deleted_at_raw, str) and deleted_at_raw.strip():
+                try:
+                    deleted_at = datetime.fromisoformat(deleted_at_raw.replace("Z", "+00:00"))
+                except Exception:
+                    deleted_at = None
+
             shard_items.append(
                 ShardWithAnalysisResponse(
                     id=s.id,
@@ -211,9 +435,13 @@ def get_episode_detail(episode_id: str) -> Optional[EpisodeDetailResponse]:
                     startTime=s.start_time,
                     endTime=s.end_time,
                     source=s.source,
+                    publishState=publish_state,
+                    deleted=deleted,
+                    deletedReason=deleted_reason,
+                    deletedAt=deleted_at,
                     meta=s.meta_json or {},
                     features=s.features_json or {},
-                    analysis=s.analysis_json or {},
+                    analysis=analysis or {},
                 )
             )
 
@@ -260,6 +488,53 @@ def update_shard(shard_id: str, updates: dict) -> Optional[Shard]:
 
         analysis_json["user"] = user_block
         shard.analysis_json = analysis_json
+
+        session.add(shard)
+        session.commit()
+        session.refresh(shard)
+        return shard
+
+
+def get_shard(shard_id: str) -> Optional[Shard]:
+    with Session(engine) as session:
+        return session.get(Shard, shard_id)
+
+
+def publish_shard(*, shard_id: str, force: bool = False) -> Optional[Shard]:
+    with Session(engine) as session:
+        shard = session.get(Shard, shard_id)
+        if shard is None:
+            return None
+
+        analysis = shard.analysis_json if isinstance(shard.analysis_json, dict) else {}
+        deleted = bool(analysis.get("deleted")) if isinstance(analysis.get("deleted"), (bool, int)) else False
+        if deleted:
+            return shard
+
+        current_state = analysis.get("publishState") if isinstance(analysis.get("publishState"), str) else None
+        if current_state == "published" and not force:
+            return shard
+
+        analysis["publishState"] = "published"
+        shard.analysis_json = analysis
+
+        session.add(shard)
+        session.commit()
+        session.refresh(shard)
+        return shard
+
+
+def soft_delete_shard(*, shard_id: str, reason: str) -> Optional[Shard]:
+    with Session(engine) as session:
+        shard = session.get(Shard, shard_id)
+        if shard is None:
+            return None
+
+        analysis = shard.analysis_json if isinstance(shard.analysis_json, dict) else {}
+        analysis["deleted"] = True
+        analysis["deletedReason"] = reason
+        analysis["deletedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        shard.analysis_json = analysis
 
         session.add(shard)
         session.commit()

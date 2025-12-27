@@ -230,6 +230,39 @@ El backend:
 
 Devuelve el shard actualizado con meta, features, analysis.
 
+
+7.7 Endpoints de comunidad (perfil/progreso/invitaciones)
+
+Estos endpoints operan sobre un perfil local.
+
+- Por defecto el backend usa `local_profile_1`.
+- (Opcional) puedes simular otro perfil con el header `X-Profile-Id`.
+
+Ejemplos:
+
+GET /me
+
+curl -sS http://localhost:5005/me | python3 -m json.tool
+
+GET /me/progress
+
+curl -sS http://localhost:5005/me/progress | python3 -m json.tool
+
+GET /me/invitations
+
+curl -sS http://localhost:5005/me/invitations | python3 -m json.tool
+
+POST /invitations
+
+curl -sS -X POST http://localhost:5005/invitations \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"test@example.com"}' | python3 -m json.tool
+
+Ejemplo usando `X-Profile-Id`:
+
+curl -sS http://localhost:5005/me \
+  -H 'X-Profile-Id: local_profile_2' | python3 -m json.tool
+
 ⸻
 
 8. Relación con el frontend EVA
@@ -267,4 +300,3 @@ Para desplegar en producción:
 
 ---
 
-Si quieres, en el siguiente paso afinamos solo la sección de **API** para que quede exactamente 1:1 con lo que EVA 1 está usando ahora mismo (nombres de campos, tipos, etc.).

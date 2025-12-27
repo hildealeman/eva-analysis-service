@@ -15,3 +15,11 @@ class ShardUpdateRequest(BaseModel):
     userTags: Optional[list[str]] = None
     userNotes: Optional[str] = None
     transcriptOverride: Optional[str] = None
+
+
+class ShardPublishRequest(BaseModel):
+    force: bool = False
+
+
+class ShardDeleteRequest(BaseModel):
+    reason: str
