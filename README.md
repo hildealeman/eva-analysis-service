@@ -194,6 +194,13 @@ Devuelve:
 
 El frontend usa esto para la vista de detalle /clips/[id].
 
+7.4.1 Insights por episodio (v0.4)
+	•	GET /episodes/{episode_id}/insights
+
+Quick test:
+
+curl -sS http://localhost:5005/episodes/{episodeId}/insights | python3 -m json.tool
+
 ⸻
 
 7.5 Actualizar metadatos de episodio
@@ -229,6 +236,56 @@ El backend:
 	•	No toca el resto del análisis automático.
 
 Devuelve el shard actualizado con meta, features, analysis.
+
+
+7.6.1 Publicar/Eliminar shard (A5)
+	•	POST /shards/{shard_id}/publish
+	•	POST /shards/{shard_id}/delete
+	•	GET /me/feed
+
+Ejemplos:
+
+Marcar shard como listo para publicar:
+
+curl -sS -X PATCH http://localhost:5005/shards/{shardId} \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"readyToPublish"}' | python3 -m json.tool
+
+curl -sS -X POST http://localhost:5005/shards/{shardId}/publish | python3 -m json.tool
+
+curl -sS -X POST http://localhost:5005/shards/{shardId}/delete \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"user_deleted"}' | python3 -m json.tool
+
+Feed interno:
+
+curl -sS http://localhost:5005/me/feed | python3 -m json.tool
+
+Ejemplo usando `X-Profile-Id`:
+
+curl -sS -X POST http://localhost:5005/shards/{shardId}/publish \
+  -H 'X-Profile-Id: local_profile_2' | python3 -m json.tool
+
+
+7.6.2 Seed de shards desde export JSON (A6)
+
+Si tienes shards/episodios que existen solo en EVA 1 (IndexedDB/export JSON), puedes “sembrarlos” en la DB local de EVA 2 para que dejen de responder `Shard not found` en:
+	•	PATCH /shards/{id}
+	•	POST /shards/{id}/publish
+	•	GET /me/feed
+	•	GET /episodes/{id}/insights
+
+Comando (desde `eva-analysis-service/` con tu venv activo):
+
+python3 -m eva_seed_from_json /ruta/al/export.json
+
+Verificación rápida (reemplaza `<SHARD_ID>`):
+
+curl -sS -X PATCH "http://localhost:5005/shards/<SHARD_ID>" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"readyToPublish"}' | python3 -m json.tool
+
+curl -sS -X POST "http://localhost:5005/shards/<SHARD_ID>/publish" | python3 -m json.tool
 
 
 7.7 Endpoints de comunidad (perfil/progreso/invitaciones)
@@ -300,3 +357,115 @@ Para desplegar en producción:
 
 ---
 
+
+
+# Playbook EVA 1 → EVA 2 (lado backend)
+
+## 1. Prerrequisitos
+
+1. Tener el repo de EVA 2 en:
+   - `/Users/hildebertoalemanguerrero/HGI - Christmas/CascadeProjects/windsurf-project/eva-analysis-service`
+2. Tener el virtualenv activo:
+   - `.venv` (en esa carpeta)
+3. Tener EVA 2 corriendo y accesible en:
+   - `http://localhost:5005`
+
+---
+
+## 2. Importar el export de EVA 1
+
+1. Ejecuta el seed (copy/paste):
+
+```bash
+cd "/Users/hildebertoalemanguerrero/HGI - Christmas/CascadeProjects/windsurf-project/eva-analysis-service"
+source .venv/bin/activate
+python3 -m eva_seed_from_json "../eva/tmp/eva1-shards-export.json"
+```
+
+2. Cómo interpretar el JSON de salida (máximo 3 líneas):
+- **`shardsInserted`**: shards nuevos que EVA 2 no tenía y fueron creados.
+- **`shardsUpdated`**: shards existentes que fueron actualizados (idempotencia).
+- **`shardsSkipped`**: entradas sin `id`/`shardId` válido (no se importan).
+
+---
+
+## 3. Verificar shards con el debug script
+
+1. Ejecuta el script:
+
+```bash
+cd "/Users/hildebertoalemanguerrero/HGI - Christmas/CascadeProjects/windsurf-project/eva-analysis-service"
+source .venv/bin/activate
+python3 eva_debug_check_shards.py
+```
+
+2. Cómo usarlo:
+- Edita la lista `DEBUG_SHARD_IDS = [...]` dentro de `eva_debug_check_shards.py`.
+- Pon ahí los shard IDs que quieras auditar (los que EVA 1 dice que exportó).
+- Re-ejecuta el script y revisa `exists`, `publishState`, `meta_status`, `emotion_headline`, etc.
+
+---
+
+## 4. Marcar shards como listos y publicar
+
+### 4.1 Marcar como listo (`readyToPublish`)
+
+```bash
+curl -sS -X PATCH "http://localhost:5005/shards/<ID>" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"readyToPublish"}' | python3 -m json.tool
+```
+
+### 4.2 Publicar
+
+```bash
+curl -sS -X POST "http://localhost:5005/shards/<ID>/publish" | python3 -m json.tool
+```
+
+### 4.3 Interpretación rápida de respuestas
+
+- **`{"detail":"Shard not found"}`**
+  - EVA 2 no tiene ese shard en su DB.
+  - Solución: confirma que el shard aparece en el export de EVA 1 y re-ejecuta el seed. Si no aparece, EVA 1 todavía no lo sincronizó.
+- **`{"detail":"not_ready_to_publish"}`**
+  - El shard existe, pero **no cumple** la regla de publicación (no está listo).
+  - Solución: hacer el `PATCH` a `readyToPublish` (o usar `force` si aplica a tu flujo).
+- **Caso exitoso**
+  - Respuesta **200** con el shard (modelo `ShardWithAnalysisResponse`), y típicamente `publishState` pasa a `"published"`.
+
+> Opcional (si necesitas otro perfil): agrega header `X-Profile-Id: <profile>` en las requests.
+
+---
+
+## 5. Verificar feed
+
+1. Consultar feed:
+
+```bash
+curl -sS "http://localhost:5005/me/feed" | python3 -m json.tool
+```
+
+2. Qué buscar:
+- Dentro de `items`, busca un objeto cuyo `shardId` coincida con el shard que publicaste.
+- Si aparece, el publish creó/actualizó el registro correspondiente en el feed para ese perfil.
+
+---
+
+## 6. Errores comunes y soluciones rápidas
+
+- **Servidor no responde / puerto incorrecto**
+  - Verifica que EVA 2 esté corriendo en `http://localhost:5005`.
+  - Revisa `GET /health` o `GET /docs`.
+- **`Shard not found` incluso después del seed**
+  - Confirma que el export de EVA 1 realmente incluye ese `shardId`.
+  - Re-ejecuta `python3 -m eva_seed_from_json "../eva/tmp/eva1-shards-export.json"`.
+  - Corre `python3 eva_debug_check_shards.py` con ese ID para confirmar `exists: true/false`.
+- **Export sin shards (seed no inserta nada)**
+  - El JSON puede estar vacío o incompleto (ej. `episodes: []`).
+  - Solución: regenerar el export en EVA 1 y re-seed.
+- **Publish siempre da `not_ready_to_publish`**
+  - Falta marcar el shard como listo:
+    - `PATCH /shards/<ID>` con `{"status":"readyToPublish"}`
+- **Feed no muestra el shard publicado**
+  - Asegúrate de estar usando el mismo perfil (por defecto `local_profile_1`).
+  - Si usas `X-Profile-Id` en publish, úsalo también al leer el feed.

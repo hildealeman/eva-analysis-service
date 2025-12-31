@@ -15,10 +15,11 @@ import logging
 import os
 import shutil
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 
 from src.config import ensure_hf_cache_dirs, get_work_dir, load_config, model_root_available
@@ -26,13 +27,22 @@ from src.db import (
     compute_episode_insights,
     compute_progress_history,
     compute_progress_summary_for_date,
+    compute_wav_features,
     create_invitation,
+    create_shard_for_episode,
+    curate_episode_detail,
+    delete_published_shard_for_profile,
+    episode_exists,
     get_episode_detail,
+    get_episode_insights,
+    get_feed_for_profile,
     get_or_create_profile,
     init_db,
     list_episodes_with_stats,
     list_invitations_for_profile,
     publish_shard,
+    publish_shard_for_profile,
+    run_full_analysis_for_shard,
     save_shard_with_analysis,
     soft_delete_shard,
     touch_profile_activity,
@@ -44,9 +54,11 @@ from src.models.emotion_model import EmotionModel
 from src.models.semantic_model import SemanticModel
 from src.models.whisper_model import WhisperModel
 from src.schemas.analysis import EmotionBlock, EmotionDistribution, SemanticBlock, SemanticFlags, ShardAnalysisResult, ShardFeatures, ShardMeta, SignalFeaturesBlock
+from src.schemas.episode_insights import EpisodeInsightsResponse as EpisodeInsightsByEpisodeResponse
 from src.schemas.episodes import EpisodeDetailResponse, EpisodeSummaryResponse, ShardWithAnalysisResponse
+from src.schemas.feed import FeedResponse
 from src.schemas.insights import EpisodeInsightsResponse
-from src.schemas.updates import EpisodeUpdateRequest, ShardDeleteRequest, ShardPublishRequest, ShardUpdateRequest
+from src.schemas.updates import EpisodeCurateRequest, EpisodeUpdateRequest, ShardDeleteRequest, ShardPublishRequest, ShardUpdateRequest
 
 
 def _map_valence_to_en(valence: Optional[str]) -> Optional[str]:
@@ -214,7 +226,7 @@ def health():
     return {
         "status": status,
         "service": "eva-analysis-service",
-        "contractVersion": "0.2.0",
+        "contractVersion": "0.5.0",
         "modelRootAvailable": available,
         "whisperLoaded": bool(app.state.whisper_loaded_runtime) if available else False,
         "emotionModelLoaded": bool(app.state.emotion_loaded_runtime) if available else False,
@@ -270,6 +282,14 @@ def get_me_invitations(x_profile_id: Optional[str] = Header(default=None, alias=
     return MeInvitationsResponse(invitations=[_invitation_to_out(i) for i in invs])
 
 
+@app.get("/me/feed", response_model=FeedResponse)
+def get_me_feed(x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id")):
+    profile_id = _current_profile_id(x_profile_id)
+    get_or_create_profile(profile_id)
+    touch_profile_activity(profile_id)
+    return get_feed_for_profile(profile_id)
+
+
 @app.post("/invitations", response_model=CreateInvitationResponse)
 def post_invitations(
     body: CreateInvitationRequest,
@@ -302,12 +322,28 @@ def get_episodes_insights():
     return compute_episode_insights()
 
 
+@app.get("/episodes/{episode_id}/insights", response_model=EpisodeInsightsByEpisodeResponse)
+def get_episode_insights_endpoint(episode_id: str):
+    insights = get_episode_insights(episode_id)
+    if insights is None:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return insights
+
+
 @app.get("/episodes/{episode_id}", response_model=EpisodeDetailResponse)
 def read_episode(episode_id: str):
     episode = get_episode_detail(episode_id)
     if episode is None:
         raise HTTPException(status_code=404, detail="Episode not found")
     return episode
+
+
+@app.post("/episodes/{episode_id}/curate", response_model=EpisodeDetailResponse)
+def curate_episode_endpoint(episode_id: str, body: EpisodeCurateRequest):
+    curated = curate_episode_detail(episode_id=episode_id, max_shards=body.max_shards)
+    if curated is None:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    return curated
 
 
 @app.patch("/episodes/{episode_id}", response_model=EpisodeSummaryResponse)
@@ -368,8 +404,169 @@ def patch_shard(shard_id: str, body: ShardUpdateRequest):
     )
 
 
+@app.get("/api/shards/{shard_id}", response_model=ShardWithAnalysisResponse, include_in_schema=False)
+@app.get("/shards/{shard_id}", response_model=ShardWithAnalysisResponse)
+def read_shard(shard_id: str):
+    shard = get_shard(shard_id)
+    if shard is None:
+        raise HTTPException(status_code=404, detail="Shard not found")
+
+    analysis = shard.analysis_json if isinstance(shard.analysis_json, dict) else {}
+    publish_state = analysis.get("publishState") if isinstance(analysis.get("publishState"), str) else None
+    deleted = bool(analysis.get("deleted")) if isinstance(analysis.get("deleted"), (bool, int)) else False
+    deleted_reason = analysis.get("deletedReason") if isinstance(analysis.get("deletedReason"), str) else None
+    deleted_at = None
+    deleted_at_raw = analysis.get("deletedAt")
+    if isinstance(deleted_at_raw, str) and deleted_at_raw.strip():
+        try:
+            deleted_at = datetime.fromisoformat(deleted_at_raw.replace("Z", "+00:00"))
+        except Exception:
+            deleted_at = None
+
+    return ShardWithAnalysisResponse(
+        id=shard.id,
+        episodeId=shard.episode_id,
+        startTime=shard.start_time,
+        endTime=shard.end_time,
+        source=shard.source,
+        publishState=publish_state,
+        deleted=deleted,
+        deletedReason=deleted_reason,
+        deletedAt=deleted_at,
+        meta=shard.meta_json or {},
+        features=shard.features_json or {},
+        analysis=analysis or {},
+    )
+
+
+@app.post("/episodes/{episode_id}/shards", response_model=ShardWithAnalysisResponse)
+async def create_episode_shard(
+    episode_id: str,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    start_time: float = Form(0.0),
+    end_time: float = Form(0.0),
+):
+    if not episode_exists(episode_id):
+        raise HTTPException(status_code=404, detail="episode_not_found")
+
+    if file.content_type and file.content_type not in {"audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"}:
+        raise HTTPException(status_code=400, detail="invalid_audio_type")
+
+    shard_id = uuid.uuid4().hex
+
+    base_dir = Path("data") / "audio" / episode_id
+    base_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = base_dir / f"{shard_id}.wav"
+
+    # Persist audio to stable disk path
+    try:
+        with wav_path.open("wb") as out:
+            shutil.copyfileobj(file.file, out)
+    finally:
+        try:
+            file.file.close()
+        except Exception:
+            pass
+
+    # Validate WAV header quickly (same heuristic as /analyze-shard)
+    try:
+        with wav_path.open("rb") as f:
+            header = f.read(12)
+        if len(header) < 12 or header[0:4] != b"RIFF" or header[8:12] != b"WAVE":
+            raise HTTPException(status_code=400, detail="invalid_wav")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_wav")
+
+    # Features from WAV
+    features_obj = compute_wav_features(wav_path=wav_path)
+
+    duration = features_obj.get("duration") if isinstance(features_obj, dict) else None
+    if (not isinstance(end_time, (int, float)) or float(end_time) <= 0.0) and isinstance(duration, (int, float)):
+        end_time = float(start_time) + float(duration)
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat().replace("+00:00", "Z")
+
+    meta_obj = {
+        "createdAt": now_iso,
+        "inputSource": "mic",
+        "intensity": 1,
+        "status": "raw",
+        "publishState": None,
+        "audioPath": str(wav_path),
+        "analysisSource": "local",
+        "analysisMode": "automatic",
+        "analysisVersion": "0.1.0-local",
+        "analysisAt": None,
+        "transcript": None,
+        "transcriptLanguage": None,
+        "transcriptionConfidence": 0,
+    }
+
+    analysis_obj = {
+        "emotion": {
+            "primary": "neutro",
+            "valence": "neutral",
+            "activation": "medium",
+            "distribution": {},
+            "headline": None,
+            "explanation": None,
+        },
+        "semantic": {
+            "summary": "",
+            "topics": [],
+            "momentType": "otro",
+            "flags": {"needsFollowup": False, "possibleCrisis": False},
+        },
+    }
+
+    shard = create_shard_for_episode(
+        shard_id=shard_id,
+        episode_id=episode_id,
+        start_time=float(start_time) if isinstance(start_time, (int, float)) else None,
+        end_time=float(end_time) if isinstance(end_time, (int, float)) else None,
+        source="local",
+        meta_obj=meta_obj,
+        features_obj=features_obj,
+        analysis_obj=analysis_obj,
+    )
+
+    background_tasks.add_task(run_full_analysis_for_shard, shard.id)
+
+    analysis = shard.analysis_json if isinstance(shard.analysis_json, dict) else {}
+    publish_state = analysis.get("publishState") if isinstance(analysis.get("publishState"), str) else None
+
+    return ShardWithAnalysisResponse(
+        id=shard.id,
+        episodeId=shard.episode_id,
+        startTime=shard.start_time,
+        endTime=shard.end_time,
+        source=shard.source,
+        publishState=publish_state,
+        deleted=False,
+        deletedReason=None,
+        deletedAt=None,
+        meta=shard.meta_json or {},
+        features=shard.features_json or {},
+        analysis=analysis or {},
+    )
+
+
+@app.post("/api/shards/{shard_id}/publish", response_model=ShardWithAnalysisResponse, include_in_schema=False)
 @app.post("/shards/{shard_id}/publish", response_model=ShardWithAnalysisResponse)
-def publish_shard_endpoint(shard_id: str, body: ShardPublishRequest):
+def publish_shard_endpoint(
+    shard_id: str,
+    body: Optional[ShardPublishRequest] = None,
+    force: Optional[bool] = Query(default=None),
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
+):
+    profile_id = _current_profile_id(x_profile_id)
+    resolved_force = bool(body.force) if body is not None else False
+    if force is not None:
+        resolved_force = bool(force)
     shard = get_shard(shard_id)
     if shard is None:
         raise HTTPException(status_code=404, detail="Shard not found")
@@ -379,7 +576,18 @@ def publish_shard_endpoint(shard_id: str, body: ShardPublishRequest):
     if deleted:
         raise HTTPException(status_code=400, detail="Cannot publish a deleted shard")
 
-    updated = publish_shard(shard_id=shard_id, force=bool(body.force))
+    try:
+        publish_shard_for_profile(profile_id=profile_id, shard_id=shard_id, force=resolved_force)
+    except ValueError as e:
+        if str(e) == "not_ready_to_publish":
+            raise HTTPException(status_code=400, detail="not_ready_to_publish")
+        if str(e) == "shard_not_found":
+            raise HTTPException(status_code=404, detail="Shard not found")
+        if str(e) == "shard_deleted":
+            raise HTTPException(status_code=400, detail="Cannot publish a deleted shard")
+        raise
+
+    updated = publish_shard(shard_id=shard_id, force=resolved_force)
     if updated is None:
         raise HTTPException(status_code=404, detail="Shard not found")
 
@@ -410,11 +618,22 @@ def publish_shard_endpoint(shard_id: str, body: ShardPublishRequest):
     )
 
 
+@app.post("/api/shards/{shard_id}/delete", response_model=ShardWithAnalysisResponse, include_in_schema=False)
 @app.post("/shards/{shard_id}/delete", response_model=ShardWithAnalysisResponse)
-def delete_shard_endpoint(shard_id: str, body: ShardDeleteRequest):
-    reason = (body.reason or "").strip()
+def delete_shard_endpoint(
+    shard_id: str,
+    body: Optional[ShardDeleteRequest] = None,
+    x_profile_id: Optional[str] = Header(default=None, alias="X-Profile-Id"),
+):
+    profile_id = _current_profile_id(x_profile_id)
+    try:
+        delete_published_shard_for_profile(profile_id=profile_id, shard_id=shard_id)
+    except ValueError:
+        pass
+
+    reason = (body.reason if body is not None else "user_deleted").strip()
     if not reason:
-        raise HTTPException(status_code=400, detail="reason is required")
+        reason = "user_deleted"
 
     updated = soft_delete_shard(shard_id=shard_id, reason=reason)
     if updated is None:

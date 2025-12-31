@@ -10,6 +10,10 @@ class EpisodeUpdateRequest(BaseModel):
     note: Optional[str] = None
 
 
+class EpisodeCurateRequest(BaseModel):
+    max_shards: int = 5
+
+
 class ShardUpdateRequest(BaseModel):
     status: Optional[str] = None
     userTags: Optional[list[str]] = None
