@@ -6,3 +6,6 @@ __pycache__/
 .DS_Store
 
 eva.db
+
+data/
+*.wav
